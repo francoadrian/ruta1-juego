@@ -1,4 +1,4 @@
-# Ruta 1 — TCG pixel-art (tcglocal)
+# Ruta 1 — TCG pixel-art
 
 Juego de cartas estilo Pokémon TCG Base Set dentro de un mundo pixel-art estilo GBA, con un backoffice para editar cartas, mundo y jugadores. Todo en español (rioplatense): código comentado, textos de UI y commits.
 
@@ -26,7 +26,7 @@ No hay build, tests ni linter todavía. `tsconfig.json` sirve solo para chequear
 | `baseset.ts`, `cards.ts` | Datos de las 102 cartas (formato compacto) + tipos `Card`/`Attack`/efectos; `cards.ts` usa `GAME_CATALOG` si existe |
 | `tcg.ts` | **Motor de reglas, lógica pura (no dibuja)**. Los efectos son listas de pasos (`EFFECT_OPS`) |
 | `ai.ts` | IA del rival (heurísticas) |
-| `art.ts` | Tiles y sprites generados por código. **También lo usa el backoffice** (`backoffice/world.js`) |
+| `art.ts` | Tiles y sprites generados por código. **También lo consume el backoffice** (repo aparte) por HTTP, como recurso público |
 | `game.ts` | Mundo, mapas, NPCs, movimiento, loop `frame` |
 | `battle.ts`, `choices.ts` | UI del combate y selectores |
 | `menu.ts`, `decks.ts`, `booster.ts`, `mail.ts` | Menú, ABM de mazos, apertura de sobres, buzón |

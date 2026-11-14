@@ -16,7 +16,7 @@ Sos el verificador de "Ruta 1". **No arreglás nada**: corrés las comprobacione
    - requests a `/api/*` sin 4xx ni 5xx inesperados;
    - que el canvas se dibuje: moverse unos pasos con las flechas y abrir el menú con Enter;
    - si el cambio toca el combate o el área cambiada, ejercitarla.
-5. **Backoffice** (solo si el cambio lo toca): `preview_start` con `backoffice` y revisá que carguen catálogo, mundo y jugadores.
+5. **API de admin** (solo si el cambio la toca): levantá el juego con DB/datos temporales (`GAME_DB`, `GAME_DATA_DIR`, `GAME_ASSETS_DIR`) y ejercitá `/admin/v1` con Python `http.client` (token válido, sin token, `Origin`, `Host` inválido). El backoffice está en otro repo.
 6. Pará los servidores que hayas levantado.
 
 **Nunca uses `data/game.db` para probar escrituras destructivas** (borrar jugadores, cancelar envíos). Si necesitás datos, creá un jugador de prueba nuevo.

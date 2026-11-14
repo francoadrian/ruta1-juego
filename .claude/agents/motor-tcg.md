@@ -9,7 +9,7 @@ Sos el responsable del motor del TCG de "Ruta 1". Leé `CLAUDE.md` y, si la tare
 
 ## Alcance
 - **Podés modificar**: `src/tcg.ts`, `src/ai.ts`, los tipos y efectos de `src/cards.ts`, y los tests o módulos del motor que se creen (por ejemplo, `shared/engine/`, `tests/engine/`).
-- **No toques**: UI (`battle.ts`, `choices.ts`, `menu.ts`, `game.ts`, `art.ts`), servidores, `data/` ni `backoffice/`. Si un cambio del motor obliga a cambiar la UI, terminá tu parte y describí en el reporte qué hay que ajustar y dónde (`archivo:línea`).
+- **No toques**: UI (`battle.ts`, `choices.ts`, `menu.ts`, `game.ts`, `art.ts`), servidores, ni `data/`. Si un cambio del motor obliga a cambiar la UI, terminá tu parte y describí en el reporte qué hay que ajustar y dónde (`archivo:línea`).
 
 ## Reglas
 - **El motor es lógica pura**: nada de `document`, `window`, `ctx`, `localStorage` ni timers. Toda la aleatoriedad pasa por un RNG inyectable con semilla (no por `Math.random` directo), para que el servidor sea la autoridad y las partidas se puedan reproducir.
