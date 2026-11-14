@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#1c1c24">
+  <title>Ruta 1</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    html, body { margin: 0; height: 100%; background: #1c1c24; color: #c8c8d0; }
+    body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+           font: 10px "Press Start 2P", monospace; overflow: hidden;
+           -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+    #screen { position: relative; line-height: 0; }
+    canvas { display: block; image-rendering: pixelated; border: 6px solid #3a3a48; border-radius: 8px;
+             background: #000; box-sizing: border-box; width: 960px; }
+    p { margin: 0; line-height: 1.8; text-align: center; padding: 0 16px; }
+    #err { color: #f08080; }
+    #pad { display: none; }
+    #typeInput { position: fixed; left: -1000px; top: 0; opacity: 0; }
+    #typeBtn { display: none; }
+
+    /* ---------- pantallas táctiles ---------- */
+    body.touch { gap: 0; justify-content: flex-start; touch-action: none; }
+    body.touch #help { display: none; }
+    body.touch canvas { border-width: 3px; border-radius: 6px; }
+    body.touch #pad { display: block; position: relative; width: 100%; flex: 1; touch-action: none; }
+    .dpad { position: absolute; width: 150px; height: 150px; border-radius: 50%; touch-action: none; }
+    .dpad::before, .dpad::after { content: ""; position: absolute; background: #3a3a48; border-radius: 10px;
+      box-shadow: inset 0 -4px 0 #24242e; }
+    .dpad::before { left: 50px; top: 4px; width: 50px; height: 142px; }
+    .dpad::after { top: 50px; left: 4px; height: 50px; width: 142px; }
+    .dpad i { position: absolute; z-index: 1; width: 0; height: 0; border: 9px solid transparent; pointer-events: none; }
+    .dpad .u { left: 66px; top: 14px; border-bottom: 12px solid #9a9aac; }
+    .dpad .d { left: 66px; bottom: 14px; border-top: 12px solid #9a9aac; }
+    .dpad .l { top: 66px; left: 14px; border-right: 12px solid #9a9aac; }
+    .dpad .r { top: 66px; right: 14px; border-left: 12px solid #9a9aac; }
+    .dpad[data-dir="up"] .u { border-bottom-color: #f0c040; }
+    .dpad[data-dir="down"] .d { border-top-color: #f0c040; }
+    .dpad[data-dir="left"] .l { border-right-color: #f0c040; }
+    .dpad[data-dir="right"] .r { border-left-color: #f0c040; }
+    .btn { position: absolute; display: grid; place-items: center; border-radius: 50%; color: #f8f8f8;
+           font: 16px "Press Start 2P", monospace; touch-action: none; box-shadow: inset 0 -5px 0 rgba(0,0,0,.35); }
+    .btn.on { filter: brightness(1.35); transform: translateY(2px); box-shadow: inset 0 -2px 0 rgba(0,0,0,.35); }
+    .btn.a { width: 74px; height: 74px; background: #c83838; }
+    .btn.b { width: 66px; height: 66px; background: #7a3a9a; }
+    .pill { position: absolute; padding: 9px 14px; border-radius: 16px; background: #3a3a48; color: #c8c8d0;
+            font: 9px "Press Start 2P", monospace; touch-action: none; box-shadow: inset 0 -3px 0 #24242e; }
+    .pill.on { background: #5a5a6c; }
+    .pill small { display: block; font-size: 6px; color: #8a8aa0; margin-top: 4px; text-align: center; }
+    #typeBtn.show { display: block; position: fixed; left: 50%; top: 12px; transform: translateX(-50%); z-index: 5;
+                    padding: 12px 16px; border-radius: 12px; background: #f0c040; color: #283850; border: 0;
+                    font: 10px "Press Start 2P", monospace; }
+
+    /* vertical: pantalla arriba, controles abajo */
+    body.touch.portrait .dpad { left: 18px; top: 50%; margin-top: -75px; }
+    body.touch.portrait .btn.a { right: 22px; top: 50%; margin-top: -78px; }
+    body.touch.portrait .btn.b { right: 108px; top: 50%; margin-top: -18px; }
+    body.touch.portrait .pill.start { left: 50%; bottom: 18px; transform: translateX(8px); }
+    body.touch.portrait .pill.view { left: 50%; bottom: 18px; transform: translateX(calc(-100% - 8px)); }
+
+    /* horizontal: pantalla al centro, controles a los costados (encima si no entran) */
+    body.touch.landscape { justify-content: center; }
+    body.touch.landscape #pad { position: fixed; inset: 0; pointer-events: none; }
+    body.touch.landscape #pad > * { pointer-events: auto; opacity: .85; }
+    body.touch.landscape .dpad { left: max(10px, env(safe-area-inset-left)); bottom: 18px; }
+    body.touch.landscape .btn.a { right: max(14px, env(safe-area-inset-right)); bottom: 70px; }
+    body.touch.landscape .btn.b { right: calc(max(14px, env(safe-area-inset-right)) + 82px); bottom: 26px; }
+    body.touch.landscape .pill.start { right: max(10px, env(safe-area-inset-right)); top: 10px; }
+    body.touch.landscape .pill.view { left: max(10px, env(safe-area-inset-left)); top: 10px; }
+  </style>
+</head>
+<body>
+  <div id="screen"><canvas id="game" width="960" height="640"></canvas></div>
+  <div id="pad" aria-hidden="true">
+    <div class="dpad"><i class="u"></i><i class="d"></i><i class="l"></i><i class="r"></i></div>
+    <div class="btn b" data-code="KeyX">B</div>
+    <div class="btn a" data-code="KeyZ">A</div>
+    <div class="pill view" data-code="KeyC">VER<small>(C)</small></div>
+    <div class="pill start" data-code="Enter">MENÚ<small>(START)</small></div>
+  </div>
+  <button id="typeBtn" type="button">⌨ ESCRIBIR NOMBRE</button>
+  <input id="typeInput" type="text" autocomplete="off" autocapitalize="characters" enterkeyhint="done">
+  <p id="help">Flechas / WASD: mover · SHIFT o X: correr · Z / Espacio: aceptar · X / Esc: volver · ENTER: menú · C: ampliar carta (en combate)</p>
+  <p id="err"></p>
+
+  <script>
+    // ---------- tamaño de la pantalla (se adapta a la ventana y al celular) ----------
+    function layout() {
+      const body = document.body;
+      const touch = body.classList.contains("touch");
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const landscape = vw > vh;
+      body.classList.toggle("landscape", touch && landscape);
+      body.classList.toggle("portrait", touch && !landscape);
+      let w;
+      if (!touch) w = Math.min(960, vw - 32, (vh - 90) * 1.5);
+      else if (landscape) w = Math.min(vw, vh * 1.5);
+      else w = Math.min(vw, (vh - 230) * 1.5); // deja lugar para los controles abajo
+      document.getElementById("game").style.width = Math.max(240, Math.floor(w)) + "px";
+    }
+    window.addEventListener("resize", layout);
+    window.addEventListener("orientationchange", () => setTimeout(layout, 200));
+    layout();
+    // que el celular no haga zoom con doble toque
+    document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
+  </script>
+
+  <!-- Compila src/*.ts en el navegador (no hace falta Node instalado) -->
+  <script src="https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js"></script>
+  <script>
+  (() => {
+    // Orden de carga: datos → jugador → motor de cartas → IA → arte → mapa → menú → combate → sobres → buzón → táctil → arranque
+    const FILES = ["src/baseset.ts", "src/cards.ts", "src/net.ts", "src/tcg.ts", "src/ai.ts", "src/art.ts", "src/game.ts", "src/menu.ts",
+      "src/decks.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
+    const getJson = (url) => fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+    // Catálogo y mundo del backoffice (opcionales): si no existen, se usan los de src/
+    const catalog = getJson("data/catalog.json").then((c) => { window.GAME_CATALOG = c; });
+    const world = getJson("data/world.json").then((w) => { window.GAME_WORLD = w; });
+
+    // Jugador: id propio en el servidor (server.py). El token secreto queda en este navegador.
+    const TOKEN_KEY = "tcglocal.playerToken";
+    function localSave() {
+      const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch { return null; } };
+      return {
+        collection: read("tcglocal.collection.v1") || {},
+        decks: read("tcglocal.decks.v1") || undefined,
+        defeated: (read("tcglocal.progress.v1") || {}).defeated || {},
+      };
+    }
+    const player = (async () => {
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        if (token) {
+          const r = await fetch("api/me", { headers: { "X-Player-Token": token }, cache: "no-store" });
+          if (r.ok) return { ...(await r.json()), token };
+          if (r.status !== 401) return null; // servidor sin API (por ejemplo, python -m http.server)
+        }
+        const r = await fetch("api/players", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ save: localSave() }),
+        });
+        if (!r.ok) return null;
+        const p = await r.json();
+        localStorage.setItem(TOKEN_KEY, p.token);
+        return p;
+      } catch {
+        return null;
+      }
+    })().then((p) => { window.GAME_PLAYER = p; });
+
+    Promise.all([catalog, world, player, ...FILES.map((f) => fetch(f, { cache: "no-store" }).then((r) => {
+      if (!r.ok) throw new Error(f + ": " + r.status);
+      return r.text();
+    }))]).then(([, , , ...sources]) => sources)
+      .then((sources) => document.fonts.load('16px "Press Start 2P"').then(() => sources))
+      .then((sources) => {
+        for (const src of sources) {
+          const out = ts.transpileModule(src, { compilerOptions: { target: ts.ScriptTarget.ES2022 } });
+          const s = document.createElement("script");
+          s.textContent = out.outputText;
+          document.body.appendChild(s);
+        }
+      })
+      .catch((e) => {
+        document.getElementById("err").textContent =
+          "No se pudieron cargar los .ts. Abrilo con el servidor del juego: python server.py";
+        console.error(e);
+      });
+  })();
+  </script>
+</body>
+</html>

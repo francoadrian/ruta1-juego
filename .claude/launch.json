@@ -1,0 +1,22 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ruta",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "server.py"
+      ],
+      "port": 8123
+    },
+    {
+      "name": "juego-prueba",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "server.py",
+        "8127"
+      ],
+      "port": 8127
+    }
+  ]
+}

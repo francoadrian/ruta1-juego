@@ -1,0 +1,672 @@
+{
+ "version": 1,
+ "start": {
+  "map": "ruta1",
+  "x": 14,
+  "y": 20,
+  "facing": "up"
+ },
+ "playerLook": {
+  "cap": "#4167b4",
+  "hair": "#3c3c49",
+  "skin": "#d59e76",
+  "top": "#5685c2",
+  "shirt": "#f8f8f8",
+  "pants": "#ffffff",
+  "shoes": "#fff700"
+ },
+ "maps": [
+  {
+   "id": "ruta1",
+   "name": "RUTA 1",
+   "tiles": [
+    "TTTTTTTTTTTTTPPPPTTTTTTTTTTTTT",
+    "TTTTTTTTTTTTTPPPPTTTTTTTTTTTTT",
+    "TT...........PPPP....ff....TTT",
+    "TT...........PPPP...........TT",
+    "TT..f........PPPP..RR.......TT",
+    "TT...........PPPP...........TT",
+    "TTFFFFFFF....PPPP.....WWWWW.TT",
+    "TT...........PPPP....WWWWWWWTT",
+    "TT..TT.......PPPP....WWWWWWWTT",
+    "TT..TT..ff...PPPP.....WWWWW.TT",
+    "TTLLLLLLLLLLLPPPPLLLLLLLLLLLTT",
+    "TT...........PPPP...........TT",
+    "TT...........PPPPPPPPPP.....TT",
+    "TT...........PPPPPPPPPP.....TT",
+    "TT........ff.PPPP...PPP.....TT",
+    "TT...........PPPP...PPP.....TT",
+    "TTTTT..ff....PPPP...PPP.....TT",
+    "TTTTT........PPPP..SPPP..ff.TT",
+    "TT...........PPPP...PPP.....TT",
+    "TT..........SPPPP...PPP..RR.TT",
+    "TT......ff...PPPPPPPPPP.....TT",
+    "TTTTTTTTTTTTTPPPPTTTTTTTTTTTTT",
+    "TTTTTTTTTTTTTPPPPTTTTTTTTTTTTT"
+   ],
+   "perm": [],
+   "signs": [
+    {
+     "x": 12,
+     "y": 19,
+     "lines": [
+      "RUTA 1",
+      "Norte: PUEBLO BRUMA\nSur: VILLA SAUCE"
+     ]
+    },
+    {
+     "x": 19,
+     "y": 17,
+     "lines": [
+      "CONSEJO PARA ENTRENADORES",
+      "Mantené SHIFT o X para correr.",
+      "Si ves a un entrenador, hablale con Z: ¡quizás quiera jugar a las cartas!"
+     ]
+    }
+   ],
+   "warps": [
+    {
+     "x": 16,
+     "y": 0,
+     "to": "ruta12",
+     "tx": 10,
+     "ty": 22
+    },
+    {
+     "x": 13,
+     "y": 0,
+     "to": "ruta12",
+     "tx": 7,
+     "ty": 22
+    },
+    {
+     "x": 14,
+     "y": 0,
+     "to": "ruta12",
+     "tx": 8,
+     "ty": 22
+    },
+    {
+     "x": 15,
+     "y": 0,
+     "to": "ruta12",
+     "tx": 9,
+     "ty": 22
+    }
+   ]
+  },
+  {
+   "id": "ruta12",
+   "name": "RUTA 1 2",
+   "tiles": [
+    "TTTTTTTTTTTTTTPPPPTT",
+    "TTTTTTTTTTTTTTPPPPTT",
+    "TTtttFLf.f.fLF.PP.TT",
+    "TTtt.FL.f.f.LF.PP.TT",
+    "TTtttFLL..fLLF.PP.TT",
+    "TTtt.FFFPPPFFF.PP.TT",
+    "TTt....SPPPPPPPPP.TT",
+    "TTttt...PPPPPPPPP.TT",
+    "TT.t.R..PPP.......TT",
+    "TTR.R.R.PPP.ttttt.TT",
+    "TT.RRRR.PPP..tt...TT",
+    "TTRRPPPRPPP.t....sTT",
+    "TTRPPPPPPPP....s.sTT",
+    "TTRPPPPPPPP...ssssTT",
+    "TTRPR.RRPPP..ssWsWTT",
+    "TTRPP.R.PPP..sWWWWTT",
+    "TTRPPR.TPPPTSssssWTT",
+    "TT.PPSTPPPPPPssssWTT",
+    "TT.PPPPPPPPPPssssWTT",
+    "TT.PPPPPPPPT.sWWWWTT",
+    "TT....TPPPP..fsWWsTT",
+    "TTTTTTTPPPPTTTTTTTTT",
+    "TTTTTTTPPPPTTTTTTTTT"
+   ],
+   "perm": [],
+   "signs": [],
+   "warps": [
+    {
+     "x": 9,
+     "y": 22,
+     "to": "ruta1",
+     "tx": 15,
+     "ty": 0
+    },
+    {
+     "x": 10,
+     "y": 22,
+     "to": "ruta1",
+     "tx": 16,
+     "ty": 0
+    },
+    {
+     "x": 8,
+     "y": 22,
+     "to": "ruta1",
+     "tx": 14,
+     "ty": 0
+    },
+    {
+     "x": 7,
+     "y": 22,
+     "to": "ruta1",
+     "tx": 13,
+     "ty": 0
+    }
+   ]
+  }
+ ],
+ "npcs": [
+  {
+   "id": "tano",
+   "name": "Tomás",
+   "map": "ruta1",
+   "x": 20,
+   "y": 13,
+   "facing": "left",
+   "look": {
+    "cap": "#209195",
+    "hair": "#cee8cd",
+    "skin": "#e8b890",
+    "top": "#a5566e",
+    "shirt": "#341656",
+    "pants": "#10342c",
+    "shoes": "#fff700"
+   },
+   "battle": true,
+   "prizes": 0,
+   "deck": {
+    "name": "Overgrowth",
+    "cards": [
+     {
+      "id": "bulbasaur",
+      "qty": 4
+     },
+     {
+      "id": "ivysaur",
+      "qty": 2
+     },
+     {
+      "id": "weedle",
+      "qty": 4
+     },
+     {
+      "id": "kakuna",
+      "qty": 2
+     },
+     {
+      "id": "beedrill",
+      "qty": 1
+     },
+     {
+      "id": "staryu",
+      "qty": 4
+     },
+     {
+      "id": "starmie",
+      "qty": 3
+     },
+     {
+      "id": "magikarp",
+      "qty": 2
+     },
+     {
+      "id": "gyarados",
+      "qty": 1
+     },
+     {
+      "id": "potion",
+      "qty": 1
+     },
+     {
+      "id": "superPotion",
+      "qty": 2
+     },
+     {
+      "id": "bill",
+      "qty": 2
+     },
+     {
+      "id": "switchCard",
+      "qty": 2
+     },
+     {
+      "id": "gustOfWind",
+      "qty": 2
+     },
+     {
+      "id": "grassEnergy",
+      "qty": 16
+     },
+     {
+      "id": "waterEnergy",
+      "qty": 12
+     }
+    ]
+   },
+   "reward": {
+    "booster": "random",
+    "once": false
+   },
+   "dialog": {
+    "intro": [
+     "¡Eh, vos! Se nota que también juntás cartas.",
+     "Mi mazo {mazoRival} no perdona."
+    ],
+    "question": "¿Jugamos una partida? ¿A cuántos Premios?",
+    "decline": [
+     "¿No? Bueno, acá voy a estar cuando quieras."
+    ],
+    "win": [
+     "¡No puede ser! Tu mazo {mazo} arrasó con mi {mazoRival}.",
+     "Bueno, lo prometido es deuda: tomá este sobre. ¡Abrilo!"
+    ],
+    "winAgain": [
+     "¡Otra vez me ganaste! Ya no me quedan sobres para darte."
+    ],
+    "lose": [
+     "¡Ja! Las plantas siempre crecen de nuevo.",
+     "Si querés la revancha, ya sabés dónde estoy."
+    ],
+    "draw": [
+     "¿Empate? ¡Qué partida! Tenemos que jugar la revancha."
+    ],
+    "talk": []
+   }
+  },
+  {
+   "id": "npc",
+   "name": "Ale",
+   "map": "ruta12",
+   "x": 5,
+   "y": 10,
+   "facing": "down",
+   "look": {
+    "cap": "#c84848",
+    "hair": "#402818",
+    "skin": "#f8d0a8",
+    "top": "#4792b3",
+    "shirt": "#ebf1ff",
+    "pants": "#404858",
+    "shoes": "#383838"
+   },
+   "battle": true,
+   "prizes": 0,
+   "deck": {
+    "name": "Overgrowth",
+    "cards": [
+     {
+      "id": "bulbasaur",
+      "qty": 4
+     },
+     {
+      "id": "ivysaur",
+      "qty": 2
+     },
+     {
+      "id": "weedle",
+      "qty": 4
+     },
+     {
+      "id": "kakuna",
+      "qty": 2
+     },
+     {
+      "id": "beedrill",
+      "qty": 1
+     },
+     {
+      "id": "staryu",
+      "qty": 4
+     },
+     {
+      "id": "starmie",
+      "qty": 3
+     },
+     {
+      "id": "magikarp",
+      "qty": 2
+     },
+     {
+      "id": "gyarados",
+      "qty": 1
+     },
+     {
+      "id": "potion",
+      "qty": 1
+     },
+     {
+      "id": "superPotion",
+      "qty": 2
+     },
+     {
+      "id": "bill",
+      "qty": 2
+     },
+     {
+      "id": "switchCard",
+      "qty": 2
+     },
+     {
+      "id": "gustOfWind",
+      "qty": 2
+     },
+     {
+      "id": "grassEnergy",
+      "qty": 16
+     },
+     {
+      "id": "waterEnergy",
+      "qty": 12
+     }
+    ]
+   },
+   "reward": {
+    "booster": "sobre",
+    "once": true
+   },
+   "dialog": {
+    "intro": [
+     "¡Hola! ¡Se dice \"socialismo con características chinas\"!"
+    ],
+    "question": "¿Jugamos, Tano?",
+    "decline": [
+     "Uh, tranqui"
+    ],
+    "win": [
+     "*piensa* ¡Viva Perón!"
+    ],
+    "winAgain": [
+     "¡Viva Perón!"
+    ],
+    "lose": [
+     "¡Viva Perón!"
+    ],
+    "draw": [
+     "¡Viva Perón!"
+    ],
+    "talk": []
+   }
+  },
+  {
+   "id": "npc2",
+   "name": "Lolo",
+   "map": "ruta12",
+   "x": 15,
+   "y": 17,
+   "facing": "left",
+   "look": {
+    "cap": "#252222",
+    "hair": "#2d2e2f",
+    "skin": "#92562a",
+    "top": "#1c1c1c",
+    "shirt": "#ad1010",
+    "pants": "#0e3062",
+    "shoes": "#958383"
+   },
+   "battle": true,
+   "prizes": 0,
+   "deck": {
+    "name": "Overgrowth",
+    "cards": [
+     {
+      "id": "bulbasaur",
+      "qty": 4
+     },
+     {
+      "id": "ivysaur",
+      "qty": 2
+     },
+     {
+      "id": "weedle",
+      "qty": 4
+     },
+     {
+      "id": "kakuna",
+      "qty": 2
+     },
+     {
+      "id": "beedrill",
+      "qty": 1
+     },
+     {
+      "id": "staryu",
+      "qty": 4
+     },
+     {
+      "id": "starmie",
+      "qty": 3
+     },
+     {
+      "id": "magikarp",
+      "qty": 2
+     },
+     {
+      "id": "gyarados",
+      "qty": 1
+     },
+     {
+      "id": "potion",
+      "qty": 1
+     },
+     {
+      "id": "superPotion",
+      "qty": 2
+     },
+     {
+      "id": "bill",
+      "qty": 2
+     },
+     {
+      "id": "switchCard",
+      "qty": 2
+     },
+     {
+      "id": "gustOfWind",
+      "qty": 2
+     },
+     {
+      "id": "grassEnergy",
+      "qty": 16
+     },
+     {
+      "id": "waterEnergy",
+      "qty": 12
+     }
+    ]
+   },
+   "reward": {
+    "booster": "sobre",
+    "once": true
+   },
+   "dialog": {
+    "intro": [
+     "¡Soy Lolo!"
+    ],
+    "question": "¡Aike jugar juntos!",
+    "decline": [
+     "Aike lástima..."
+    ],
+    "win": [
+     "¡Aike bronca!"
+    ],
+    "winAgain": [
+     "¡Aike bronca de nuevo!"
+    ],
+    "lose": [
+     "¡Aike bueno!"
+    ],
+    "draw": [
+     "¡Empate! ...aike."
+    ],
+    "talk": []
+   }
+  },
+  {
+   "id": "npc3",
+   "name": "Aike",
+   "map": "ruta12",
+   "x": 15,
+   "y": 18,
+   "facing": "up",
+   "look": {
+    "cap": "#c84848",
+    "hair": "#e8dd96",
+    "skin": "#f8d0a8",
+    "top": "#ffffff",
+    "shirt": "#f8f8f8",
+    "pants": "#577cc7",
+    "shoes": "#383838"
+   },
+   "battle": false,
+   "prizes": 0,
+   "deck": {
+    "name": "asd",
+    "cards": []
+   },
+   "reward": {
+    "booster": "random",
+    "once": true
+   },
+   "dialog": {
+    "intro": [
+     "¡Hola! ¿Te animás a una partida?"
+    ],
+    "question": "¿Jugamos?",
+    "decline": [
+     "Otra vez será."
+    ],
+    "win": [
+     "¡Qué bien jugás! Tomá, te lo ganaste."
+    ],
+    "winAgain": [
+     "¡Me ganaste de nuevo!"
+    ],
+    "lose": [
+     "¡Gané yo!"
+    ],
+    "draw": [
+     "¡Empate!"
+    ],
+    "talk": [
+     "¡Aike, Aike!"
+    ]
+   }
+  },
+  {
+   "id": "npc4",
+   "name": "Juali",
+   "map": "ruta12",
+   "x": 9,
+   "y": 3,
+   "facing": "down",
+   "look": {
+    "cap": "#623c1d",
+    "hair": "#433223",
+    "skin": "#b88756",
+    "top": "#b3946f",
+    "shirt": "#f8f8f8",
+    "pants": "#404858",
+    "shoes": "#383838"
+   },
+   "battle": true,
+   "prizes": 0,
+   "deck": {
+    "name": "Overgrowth",
+    "cards": [
+     {
+      "id": "bulbasaur",
+      "qty": 4
+     },
+     {
+      "id": "ivysaur",
+      "qty": 2
+     },
+     {
+      "id": "weedle",
+      "qty": 4
+     },
+     {
+      "id": "kakuna",
+      "qty": 2
+     },
+     {
+      "id": "beedrill",
+      "qty": 1
+     },
+     {
+      "id": "staryu",
+      "qty": 4
+     },
+     {
+      "id": "starmie",
+      "qty": 3
+     },
+     {
+      "id": "magikarp",
+      "qty": 2
+     },
+     {
+      "id": "gyarados",
+      "qty": 1
+     },
+     {
+      "id": "potion",
+      "qty": 1
+     },
+     {
+      "id": "superPotion",
+      "qty": 2
+     },
+     {
+      "id": "bill",
+      "qty": 2
+     },
+     {
+      "id": "switchCard",
+      "qty": 2
+     },
+     {
+      "id": "gustOfWind",
+      "qty": 2
+     },
+     {
+      "id": "grassEnergy",
+      "qty": 16
+     },
+     {
+      "id": "waterEnergy",
+      "qty": 12
+     }
+    ]
+   },
+   "reward": {
+    "booster": "sobre",
+    "once": true
+   },
+   "dialog": {
+    "intro": [
+     "¡Tano!"
+    ],
+    "question": "...tengo propo ;)",
+    "decline": [
+     "Otra vez será."
+    ],
+    "win": [
+     "¡Viva Perón!"
+    ],
+    "winAgain": [
+     "¡Me ganaste de nuevo!"
+    ],
+    "lose": [
+     "¡Gané yo!"
+    ],
+    "draw": [
+     "¡Empate!"
+    ],
+    "talk": []
+   }
+  }
+ ]
+}
