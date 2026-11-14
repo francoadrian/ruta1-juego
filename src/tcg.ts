@@ -83,17 +83,21 @@ interface Battle {
   after: After | null;
   first: 0 | 1;
   prizeCount: number;
+  /** RNG de la partida (no se serializa: ver newBattle). Toda la aleatoriedad del motor sale de acá. */
+  rng: Rng;
+  /** Próximo uid de carta a repartir en esta partida (no se serializa). */
+  uidNext: number;
 }
 
 const BENCH_MAX = 5;
 const PRIZES = 6;
-let CI_UID = 1;
 
-const newCI = (c: Card): CI => ({ uid: CI_UID++, c });
+/** Carta sin uid todavía: los uids se asignan después de mezclar (ver newBattle), para que el orden del mazo no se filtre. */
+const newCI = (c: Card): CI => ({ uid: 0, c });
 
-function shuffle<T>(a: T[]): T[] {
+function shuffle<T>(a: T[], rng: Rng): T[] {
   for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(rng.next() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
@@ -134,7 +138,7 @@ function log(b: Battle, msg: string): void {
 }
 
 function coin(b: Battle): boolean {
-  const heads = Math.random() < 0.5;
+  const heads = b.rng.next() < 0.5;
   log(b, `Moneda: ${heads ? "CARA" : "CRUZ"}`);
   return heads;
 }
@@ -184,28 +188,43 @@ const STATUS_ES: Record<Exclude<Status, null>, string> = {
 // ---------------------------------------------------------------------
 //  Preparación
 // ---------------------------------------------------------------------
-function newPlayer(deck: Deck, name: string, ai: boolean): PlayerSt {
+function newPlayer(deck: Deck, name: string, ai: boolean, rng: Rng): PlayerSt {
   const cards = deck.cards.flatMap((e) => Array.from({ length: e.qty }, () => newCI(CARDS[e.id])));
   return {
-    name, deckName: deck.name, ai, deck: shuffle(cards), hand: [], discard: [], prizes: [],
+    name, deckName: deck.name, ai, deck: shuffle(cards, rng), hand: [], discard: [], prizes: [],
     active: null, bench: [], turns: 0, mulligans: 0,
   };
 }
 
-function newBattle(myDeck: Deck, oppDeck: Deck, myName: string, oppName: string, prizeCount = PRIZES): Battle {
+interface NewBattleOpts {
+  rng: Rng;
+  prizes?: number;
+  /** Qué jugadores maneja la IA (por defecto [false, true]: el jugador 0 es humano). */
+  ai?: [boolean, boolean];
+}
+
+function newBattle(decks: [Deck, Deck], names: [string, string], opts: NewBattleOpts): Battle {
+  const rng = opts.rng;
+  const ai = opts.ai ?? [false, true];
   const b: Battle = {
-    p: [newPlayer(myDeck, myName, false), newPlayer(oppDeck, oppName, true)],
+    p: [newPlayer(decks[0], names[0], ai[0], rng), newPlayer(decks[1], names[1], ai[1], rng)],
     cur: 0, turn: 0, energyPlayed: false, retreated: false, phase: "setup",
-    winner: -1, log: [], promoteQueue: [], after: null, first: 0, prizeCount,
+    winner: -1, log: [], promoteQueue: [], after: null, first: 0, prizeCount: opts.prizes ?? PRIZES,
+    rng, uidNext: 1,
   };
-  log(b, `Comienza la partida: ${myDeck.name} vs ${oppDeck.name}.`);
+  // rng y uidNext son estado interno: no viajan en JSON.
+  Object.defineProperty(b, "rng", { enumerable: false });
+  Object.defineProperty(b, "uidNext", { enumerable: false });
+  // uids por partida, asignados DESPUÉS de mezclar: el uid no revela la posición original en el mazo.
+  for (const p of b.p) for (const c of p.deck) c.uid = b.uidNext++;
+  log(b, `Comienza la partida: ${decks[0].name} vs ${decks[1].name}.`);
   for (const p of b.p) {
     draw(p, 7);
     while (!p.hand.some((c) => isBasic(c.c))) {
       p.mulligans++;
       log(b, `${p.name} no tiene Pokémon Básicos: muestra la mano y vuelve a mezclar.`);
       p.deck.push(...p.hand.splice(0));
-      shuffle(p.deck);
+      shuffle(p.deck, b.rng);
       draw(p, 7);
     }
   }
@@ -904,7 +923,7 @@ function runTrainerStep(x: TrainerCtx, st: Step, pk: TPick): void {
           : q.hand.filter((c) => matchFilter(c.c, st.filter) && !x.moved.has(c));
         for (const c of moving) removeFrom(q.hand, c);
         q.deck.push(...moving);
-        shuffle(q.deck);
+        shuffle(q.deck, b.rng);
         log(b, `${q.name} mezcla ${moving.length} carta(s) de su mano en su mazo.`);
       }
       break;
@@ -920,7 +939,7 @@ function runTrainerStep(x: TrainerCtx, st: Step, pk: TPick): void {
       const list = takeCards(x, p.deck, st.filter, Math.max(1, n), pk.cards, (ok) => ok);
       for (const c of list) removeFrom(p.deck, c);
       p.hand.push(...list);
-      shuffle(p.deck);
+      shuffle(p.deck, b.rng);
       log(b, `${p.name} busca ${list.map((c) => c.c.name).join(" y ") || "nada"} en su mazo.`);
       break;
     }

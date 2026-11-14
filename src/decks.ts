@@ -116,7 +116,7 @@ function runDeckOption(opt: string): void {
       break;
     case "HACER PRINCIPAL": {
       if (isMain(deck)) return menuToast(`${deck.name} ya es tu mazo principal.`);
-      const problems = deckProblems(deck);
+      const problems = deckProblems(deck, ownedNow());
       if (problems.length) return menuToast(`No se puede: ${problems[0]}`);
       playerDecks.mainId = deck.id!;
       savePlayerDecks();
@@ -232,7 +232,7 @@ function removeCard(id: string): void {
 
 function saveEditor(): void {
   const d = DM.editing!;
-  const problems = deckProblems(d);
+  const problems = deckProblems(d, ownedNow());
   if (d.id === playerDecks.mainId && problems.length) {
     return menuToast(`Tu mazo principal tiene que estar completo: ${problems[0]}`);
   }
@@ -370,7 +370,7 @@ function renderDeckList(): void {
       rarityMark("Rare", x + w - 150, y + 25, 14, "#4a3a08");
       text("PRINCIPAL", x + w - 86, y + 19, 10, "#4a3a08", { align: "center" });
     }
-    const problems = deckProblems(deck);
+    const problems = deckProblems(deck, ownedNow());
     const n = deckCount(deck);
     const parts = `${n}/${DECK_SIZE} cartas · Pokémon ${deckCount(deck, "pokemon")} · Entren. ${deckCount(deck, "trainer")} · Energía ${deckCount(deck, "energy")}`;
     text(parts, x + 92, y + 44, 9, "#505050");
@@ -447,7 +447,7 @@ function renderDeckEditor(): void {
   // resumen
   const sx = 500;
   const sw = 436;
-  const problems = deckProblems(d);
+  const problems = deckProblems(d, ownedNow());
   rrect(sx, 78, sw, 108, 12, "#f8f8f0", "#283850", 3);
   text(`${n}/${DECK_SIZE}`, sx + 18, 92, 22, n === DECK_SIZE ? "#2a7a3a" : "#c03020");
   text(`Pokémon ${deckCount(d, "pokemon")} · Entren. ${deckCount(d, "trainer")} · Energía ${deckCount(d, "energy")}`, sx + 18, 126, 9, "#505050");

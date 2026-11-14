@@ -49,43 +49,8 @@ const ROW = { w: 65, h: 91, gap: 6, y: 494 };
 const DETAIL = { w: 400, h: 560 };
 
 // ---------------------------------------------------------------------
-//  Generación
+//  Generación: ver packs.ts (generateBooster)
 // ---------------------------------------------------------------------
-function slotPool(pool: string[], kind: SlotKind): string[] {
-  return pool.filter((id) => {
-    const c = CARDS[id];
-    if (kind === "Energy") return isBasicEnergy(c);
-    if (isBasicEnergy(c)) return false;
-    return kind === "Any" || c.rarity === kind;
-  });
-}
-
-/** n cartas al azar; sin repetir mientras alcance el pool. */
-function pickCards(pool: string[], n: number): string[] {
-  const out: string[] = [];
-  while (out.length < n && pool.length) out.push(...shuffle([...pool]).slice(0, n - out.length));
-  return out;
-}
-
-function generateBooster(def: BoosterDef): string[] {
-  const pool = def.cards.filter(isPlayable);
-  const out: string[] = [];
-  for (const slot of def.slots?.length ? def.slots : DEFAULT_SLOTS) {
-    let candidates = slotPool(pool, slot.rarity);
-    if (slot.holoChance !== undefined) {
-      const wantHolo = Math.random() < slot.holoChance;
-      const sub = candidates.filter((id) => !!CARDS[id].holo === wantHolo);
-      if (sub.length) candidates = sub;
-    }
-    if (!candidates.length) candidates = slotPool(pool, "Any"); // el sobre no tiene de esa rareza
-    if (!candidates.length) candidates = pool;
-    out.push(...pickCards(candidates.filter((id) => !out.includes(id) || slot.rarity === "Energy"), slot.count));
-  }
-  // de menos raras a más raras: la mejor carta queda para el final
-  const rank = (id: string) => (isBasicEnergy(CARDS[id]) ? 0 : 1 + ["Common", "Uncommon", "Rare", "Rare Holo"].indexOf(CARDS[id].rarity) + (CARDS[id].holo ? 4 : 0));
-  return out.sort((a, b) => rank(a) - rank(b));
-}
-
 let currentBooster: BoosterDef | null = null;
 
 /** Sobre por id (aunque esté deshabilitado, por si llegó al buzón antes de deshabilitarlo). */
@@ -119,7 +84,7 @@ function startBooster(onDone: () => void, boosterId?: string, title = "¡Te dier
     onDone(); // no hay sobres habilitados
     return;
   }
-  const cards = generateBooster(currentBooster);
+  const cards = generateBooster(currentBooster, sfc32(randomSeed()));
   resetBooster(onDone, { cards, isNew: newFlags(cards), title });
 }
 

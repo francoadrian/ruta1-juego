@@ -500,29 +500,6 @@ const BOOSTERS: BoosterDef[] = CATALOG
   ? (CATALOG.boosters ?? []).filter((b) => b.enabled !== false && b.cards?.length)
   : [{ id: "baseSet", name: "Base Set", enabled: true, cards: BASE_SET_IDS.slice(1), slots: DEFAULT_SLOTS }];
 
-// ---------------------------------------------------------------------
-//  Imágenes (frente de cartas, dorso, texturas de sobres)
-// ---------------------------------------------------------------------
-const IMG_CACHE = new Map<string, HTMLImageElement>();
-
-/** Devuelve la imagen si ya terminó de cargar (si no, la empieza a cargar y devuelve null). */
-function loadedImage(src?: string | null): HTMLImageElement | null {
-  if (!src) return null;
-  let img = IMG_CACHE.get(src);
-  if (!img) {
-    img = new Image();
-    img.src = src;
-    IMG_CACHE.set(src, img);
-  }
-  return img.complete && img.naturalWidth > 0 ? img : null;
-}
-
-for (const src of [CARD_BACK_IMAGE, ...Object.values(CARDS).map((c) => c.image), ...BOOSTERS.flatMap((b) => [b.front, b.back])]) {
-  loadedImage(src);
-}
-
-const cardImage = (card: Card): HTMLImageElement | null => loadedImage(card.image);
-
 interface DeckEntry {
   id: string;
   qty: number;
@@ -603,57 +580,6 @@ for (const list of [BRUSHFIRE.cards, OVERGROWTH.cards, EXTRA_OWNED]) {
   list.push(...keep);
 }
 
-const COLLECTION_KEY = "tcglocal.collection.v1";
-
-/** Jugador conectado al servidor (index.html lo deja en window.GAME_PLAYER). */
-interface PlayerProfile {
-  id: string;
-  token?: string;
-  name: string;
-  rev: number;
-  save?: { collection?: Record<string, number>; decks?: PlayerDecks; defeated?: Record<string, number> };
-  mail?: unknown[];
-}
-declare const GAME_PLAYER: PlayerProfile | null | undefined;
-const PLAYER: PlayerProfile | null = typeof GAME_PLAYER === "object" && GAME_PLAYER?.id ? GAME_PLAYER : null;
-
-/** Cartas ganadas en sobres o recibidas en el buzón (id → copias). Fuente: el servidor (o el navegador). */
-const pulledCards: Record<string, number> = (() => {
-  try {
-    const data = (PLAYER?.save?.collection ?? JSON.parse(localStorage.getItem(COLLECTION_KEY) ?? "{}")) as Record<string, number>;
-    return Object.fromEntries(Object.entries(data).filter(([id, q]) => CARDS[id] && q > 0));
-  } catch {
-    return {};
-  }
-})();
-
-/** La colección del jugador: cada carta una vez, con la cantidad de copias que tiene. */
-const COLLECTION: DeckEntry[] = [];
-
-function rebuildCollection(): void {
-  const qty = new Map<string, number>();
-  const all = [...BRUSHFIRE.cards, ...EXTRA_OWNED, ...Object.entries(pulledCards).map(([id, q]) => ({ id, qty: q }))];
-  for (const e of all) if (isPlayable(e.id)) qty.set(e.id, (qty.get(e.id) ?? 0) + e.qty);
-  COLLECTION.length = 0;
-  COLLECTION.push(...[...qty].map(([id, q]) => ({ id, qty: q })).sort((a, b) => CARDS[a.id].number - CARDS[b.id].number));
-}
-rebuildCollection();
-
-/** Suma cartas a la colección (por ejemplo, las de un sobre) y lo guarda. */
-function addToCollection(ids: string[]): void {
-  for (const id of ids) pulledCards[id] = (pulledCards[id] ?? 0) + 1;
-  try {
-    localStorage.setItem(COLLECTION_KEY, JSON.stringify(pulledCards));
-  } catch {
-    /* sin almacenamiento: dura hasta recargar */
-  }
-  rebuildCollection();
-  noteAdds(ids);
-  queueSave();
-}
-
-const ownedQty = (id: string): number => COLLECTION.find((e) => e.id === id)?.qty ?? 0;
-
 const DECK_SIZE = 60;
 const MAX_COPIES = 4;
 const DECK_NAME_MAX = 14;
@@ -668,8 +594,23 @@ const qtyInDeck = (deck: Deck, id: string): number => deck.cards.find((e) => e.i
 const copiesByName = (deck: Deck, name: string): number =>
   deck.cards.filter((e) => CARDS[e.id].name === name).reduce((n, e) => n + e.qty, 0);
 
-/** Problemas que impiden usar el mazo (lista vacía = mazo válido). */
-function deckProblems(deck: Deck): string[] {
+/**
+ * Copias que tiene un jugador de cada carta: la colección inicial (Brushfire + EXTRA_OWNED)
+ * más lo ganado (`pulled`: id → copias). Solo cuenta cartas habilitadas. Puro: no toca el navegador.
+ */
+function ownedCounts(pulled: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  const add = (id: string, q: number): void => {
+    if (isPlayable(id) && q > 0) out[id] = (out[id] ?? 0) + q;
+  };
+  for (const e of BRUSHFIRE.cards) add(e.id, e.qty);
+  for (const e of EXTRA_OWNED) add(e.id, e.qty);
+  for (const [id, q] of Object.entries(pulled)) add(id, q);
+  return out;
+}
+
+/** Problemas que impiden usar el mazo (lista vacía = mazo válido). `owned`: copias que tiene el jugador (ver ownedCounts). */
+function deckProblems(deck: Deck, owned: Record<string, number>): string[] {
   const out: string[] = [];
   const n = deckCount(deck);
   if (n !== DECK_SIZE) out.push(`Tiene ${n} de ${DECK_SIZE} cartas.`);
@@ -679,12 +620,15 @@ function deckProblems(deck: Deck): string[] {
     const c = deck.cards.find((e) => CARDS[e.id].name === name)!;
     if (!isBasicEnergy(CARDS[c.id]) && copiesByName(deck, name) > MAX_COPIES) out.push(`Más de ${MAX_COPIES} copias de ${name}.`);
   }
-  for (const e of deck.cards) if (e.qty > ownedQty(e.id)) out.push(`Solo tenés ${ownedQty(e.id)} ${CARDS[e.id].name}.`);
+  for (const e of deck.cards) {
+    const have = owned[e.id] ?? 0;
+    if (e.qty > have) out.push(`Solo tenés ${have} ${CARDS[e.id].name}.`);
+  }
   return out;
 }
 
 const isBasicCard = (c: Card): boolean => c.kind === "pokemon" && c.stage === "Basic";
-const isDeckValid = (deck: Deck): boolean => deckProblems(deck).length === 0;
+const isDeckValid = (deck: Deck, owned: Record<string, number>): boolean => deckProblems(deck, owned).length === 0;
 
 /** Descripción corta de un mazo según los tipos de sus Pokémon. */
 function deckInfo(deck: Deck): string {
@@ -701,71 +645,3 @@ const TYPE_NAMES_ES: Record<EType, string> = {
   Fire: "Fuego", Grass: "Planta", Water: "Agua", Psychic: "Psíquico",
   Lightning: "Rayo", Fighting: "Lucha", Colorless: "Incoloro",
 };
-
-// ---------------------------------------------------------------------
-//  Mazos guardados (localStorage) y mazo principal
-// ---------------------------------------------------------------------
-interface PlayerDecks {
-  decks: Deck[];
-  mainId: string;
-  nextId: number;
-}
-
-const STORAGE_KEY = "tcglocal.decks.v1";
-
-function defaultPlayerDecks(): PlayerDecks {
-  return {
-    decks: [{ id: "d1", name: "Brushfire", cards: BRUSHFIRE.cards.map((e) => ({ ...e })) }],
-    mainId: "d1",
-    nextId: 2,
-  };
-}
-
-function loadPlayerDecks(): PlayerDecks {
-  if (PLAYER?.save?.decks) return readPlayerDecks(PLAYER.save.decks);
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? readPlayerDecks(JSON.parse(raw)) : defaultPlayerDecks();
-  } catch {
-    return defaultPlayerDecks();
-  }
-}
-
-/** Valida mazos guardados (del servidor o del navegador). */
-function readPlayerDecks(data: PlayerDecks): PlayerDecks {
-  try {
-    const decks = (data.decks ?? [])
-      .filter((d) => d && typeof d.id === "string")
-      .map((d) => ({
-        id: d.id,
-        name: String(d.name || "Mazo").slice(0, DECK_NAME_MAX),
-        cards: (d.cards ?? [])
-          .filter((e) => isPlayable(e.id) && e.qty > 0)
-          .map((e) => ({ id: e.id, qty: Math.min(e.qty, ownedQty(e.id)) })),
-      }));
-    if (!decks.length) return defaultPlayerDecks();
-    const res: PlayerDecks = { decks, mainId: data.mainId, nextId: Math.max(data.nextId || 1, decks.length + 1) };
-    const main = decks.find((d) => d.id === res.mainId);
-    if (!main || !isDeckValid(main)) res.mainId = (decks.find(isDeckValid) ?? decks[0]).id!;
-    return res;
-  } catch {
-    return defaultPlayerDecks();
-  }
-}
-
-function savePlayerDecks(): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(playerDecks));
-  } catch {
-    /* sin almacenamiento: los cambios duran hasta recargar la página */
-  }
-  queueSave();
-}
-
-const playerDecks: PlayerDecks = loadPlayerDecks();
-
-/** El mazo con el que se juega cada combate. */
-function mainDeck(): Deck {
-  const d = playerDecks.decks.find((x) => x.id === playerDecks.mainId);
-  return d && isDeckValid(d) ? d : BRUSHFIRE;
-}

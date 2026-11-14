@@ -39,7 +39,7 @@ async function openMailItem(m: MailItem): Promise<void> {
     if (m.kind === "booster") {
       const def = boosterById(m.payload.booster ?? "");
       if (!def) return menuToast("Ese sobre ya no existe en el catálogo. Pedile al operador que te mande otro.");
-      const cards = generateBooster(def);
+      const cards = generateBooster(def, sfc32(randomSeed())); // TODO paso 9: el sobre lo genera el servidor
       const isNew = newFlags(cards);
       const err = await claimMail(m, cards);
       if (err) return menuToast(err);

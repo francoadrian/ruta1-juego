@@ -92,7 +92,11 @@ const rivalName = (): string => BT.b?.p[RIVAL].name ?? game.opponent?.def.name ?
 function startBattle(prizes = PRIZES): void {
   game.mode = "battle";
   const opp = game.opponent;
-  BT.b = newBattle(mainDeck(), npcDeck(opp), playerName(), opp?.def.name ?? "RIVAL", prizes);
+  BT.b = newBattle([mainDeck(), npcDeck(opp)], [playerName(), opp?.def.name ?? "RIVAL"], {
+    rng: sfc32(randomSeed()), // modo local: semilla propia del cliente
+    prizes,
+    ai: [false, true],
+  });
   BT.mode = "idle";
   BT.pick = null;
   BT.zoom = null;

@@ -114,9 +114,9 @@
   <script src="https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js"></script>
   <script>
   (() => {
-    // Orden de carga: datos → jugador → motor de cartas → IA → arte → mapa → menú → combate → sobres → buzón → táctil → arranque
-    const FILES = ["src/baseset.ts", "src/cards.ts", "src/net.ts", "src/tcg.ts", "src/ai.ts", "src/art.ts", "src/game.ts", "src/menu.ts",
-      "src/decks.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
+    // Orden de carga (ADR 0002 3.1): núcleo sin DOM (cartas → rng → motor → IA → sobres) → jugador/red (DOM) → arte → mapa → menú → combate → sobres → buzón → táctil → arranque
+    const FILES = ["src/baseset.ts", "src/cards.ts", "src/rng.ts", "src/tcg.ts", "src/ai.ts", "src/packs.ts", "src/player.ts", "src/net.ts",
+      "src/art.ts", "src/game.ts", "src/menu.ts", "src/decks.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
     const getJson = (url) => fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
     // Catálogo y mundo del backoffice (opcionales): si no existen, se usan los de src/
