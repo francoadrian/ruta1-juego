@@ -426,9 +426,11 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (!def || def.battle === false) return err(conn, "npc.start", "Ese NPC no juega partidas.");
     if (overStartBudget(conn, me, "npc.start")) return;
     // premios contra un NPC: si def.prizes > 0, esos (el `prizes` del cliente se ignora); si no, el jugador elige 6 o 1
-    // (solo esas dos opciones, como en el diálogo; cualquier otro valor o ausente → 6)
+    // (solo esas dos opciones, como en el diálogo; cualquier otro valor o ausente → 6). Si el NPC da un sobre que se
+    // repite (sin `once: true`), siempre 6: si no, ganar a 1 premio en bucle sería una forma barata de farmear sobres
     const fixed = Number(def.prizes) || 0;
-    const prizes = fixed > 0 ? Math.max(1, Math.min(6, Math.floor(fixed))) : msg.prizes === 1 ? 1 : 6;
+    const repeatable = !!def.reward?.booster && def.reward.once !== true;
+    const prizes = fixed > 0 ? Math.max(1, Math.min(6, Math.floor(fixed))) : msg.prizes === 1 && !repeatable ? 1 : 6;
     const core = engine.core();
     const mine = deckOf(core, me.id, typeof msg.deckId === "string" ? msg.deckId : undefined);
     if ("error" in mine) return err(conn, "npc.start", mine.error);

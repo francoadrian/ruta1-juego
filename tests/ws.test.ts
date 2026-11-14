@@ -1124,6 +1124,25 @@ describe("Endurecimiento: B4, B8, deckName y mazos con cartas que ya no se regal
     }
   });
 
+  it("B8: si el sobre del NPC se repite (sin once), siempre a 6 aunque pida 1", async () => {
+    const world = JSON.parse(readFileSync(path.join(s.dir, "data", "world.json"), "utf8"));
+    const npc = world.npcs.find((n: any) => n.id === TEST_NPC);
+    const before = npc.reward;
+    npc.reward = { booster: "random" };
+    writeFileSync(path.join(s.dir, "data", "world.json"), JSON.stringify(world));
+    try {
+      const p = await newPlayer(s, "AnaRepite");
+      const c = await Client.login(s.port, p);
+      c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1", prizes: 1 });
+      const st = await c.take("match.start");
+      assert.equal(st.view.prizeCount, 6);
+      c.close();
+    } finally {
+      npc.reward = before;
+      writeFileSync(path.join(s.dir, "data", "world.json"), JSON.stringify(world));
+    }
+  });
+
   it("deckName: cada uno ve solo el nombre de su propio mazo", async () => {
     const pa = await newPlayer(s, "Ana2");
     const pb = await newPlayer(s, "Beto2");

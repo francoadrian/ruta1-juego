@@ -453,7 +453,9 @@ function talkTo(n: NpcRt): void {
     // si el NPC tiene `prizes` (> 0) se juega a esa cantidad; si no, el jugador elige 6 o 1
     // (mismo criterio que el servidor, server/ws.ts)
     const raw = Number(n.def.prizes) || 0;
-    const fixed = raw > 0 ? Math.max(1, Math.min(6, Math.floor(raw))) : 0;
+    // un sobre que se repite (sin `once: true`) se juega siempre a 6, como lo fuerza el servidor
+    const repeatable = !!n.def.reward?.booster && n.def.reward.once !== true;
+    const fixed = raw > 0 ? Math.max(1, Math.min(6, Math.floor(raw))) : repeatable ? 6 : 0;
     const opts = fixed ? [`¡DALE! (${fixed} PREMIO${fixed > 1 ? "S" : ""})`, "AHORA NO"] : ["6 PREMIOS", "1 PREMIO", "CANCELAR"];
     openChoice(fillText(n, d.question || "¿Jugamos una partida?"), opts, (i) => {
       if (i === opts.length - 1) {
