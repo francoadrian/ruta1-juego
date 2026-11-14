@@ -68,8 +68,8 @@ Handshake: `Origin` ∈ `ALLOWED_ORIGINS` y `Host` ∈ `ALLOWED_HOSTS`, si no 40
 | S→C | `lobby` | `{"online":[{"id":"J-XYZ789","name":"Tomi","status":"libre"\|"jugando"}]}` |
 | C→S | `challenge.send` | `{"to":"J-XYZ789","deckId":"d1","prizes":6}` |
 | S→C | `challenge.incoming` | `{"id":"C-12","from":{"id":"J-ABC234","name":"Fran"},"prizes":6,"expires":1763130000}` |
-| C→S | `challenge.accept` / `.decline` / `.cancel` | `{"id":"C-12","deckId":"d2"}` (deckId solo en accept) |
-| S→C | `challenge.update` | `{"id":"C-12","status":"accepted"\|"declined"\|"cancelled"\|"expired","error?":"..."}` |
+| C→S | `challenge.accept` / `.decline` / `.cancel` | `{"id":"C-12","deckId":"d2"}` (deckId solo en accept; cancel acepta `{"to":"J-XYZ789"}` sin id) |
+| S→C | `challenge.update` | `{"id":"C-12","to?":"J-XYZ789","status":"pending"\|"accepted"\|"declined"\|"cancelled"\|"expired","error?":"..."}` |
 | C→S | `queue.join` / `queue.leave` | `{"deckId":"d1"}` (cola FIFO; empareja de a dos) |
 | C→S | `npc.start` | `{"npc":"npc-brock","deckId":"d1"}` (NPC de `world.json`) |
 | S→C | `match.start` | `{"match":"M-9F3K","vs":"pvp"\|"npc","opp":{"name":"Tomi"},"seq":0,"view":BattleView,"deadline":1763130090}` |

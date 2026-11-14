@@ -27,7 +27,7 @@ import path from "node:path";
 
 const need = (n: string): string => {
   const v = process.env[n];
-  if (!v) throw new Error(`Falta la variable de entorno ${n} (ver tests/run-against-python.mjs)`);
+  if (!v) throw new Error(`Falta la variable de entorno ${n} (ver tests/run-against-node.mjs)`);
   return v;
 };
 const GAME = need("GAME_URL");
@@ -170,6 +170,33 @@ describe("estáticos: lista blanca PUBLIC", () => {
       assert.equal(r.status, 200, p);
       assert.ok(r.buf.length > 1000, p);
     }
+  });
+
+  it("sirve /vendor/typescript.js (JavaScript, nosniff, cacheable con ETag) y la fuente woff2", async () => {
+    const t = await game("GET", "/vendor/typescript.js");
+    assert.equal(t.status, 200);
+    assert.match(String(t.headers["content-type"]), /^text\/javascript/);
+    assert.equal(t.headers["x-content-type-options"], "nosniff");
+    assert.match(String(t.headers["cache-control"]), /max-age=\d+/);
+    assert.ok(t.buf.length > 1_000_000);
+    const etag = String(t.headers.etag);
+    assert.ok(etag);
+    assert.equal((await game("GET", "/vendor/typescript.js", { headers: { "If-None-Match": etag } })).status, 304);
+    assert.equal((await game("HEAD", "/vendor/typescript.js")).status, 200);
+    const f = await game("GET", "/assets/fonts/press-start-2p-latin.woff2");
+    assert.equal(f.status, 200);
+    assert.equal(f.headers["content-type"], "font/woff2");
+    assert.equal(f.headers["x-content-type-options"], "nosniff");
+    assert.equal(f.buf.subarray(0, 4).toString("latin1"), "wOF2");
+  });
+
+  it("vendor y fuentes: nada más que ese patrón (sin traversal, sin otras extensiones)", async () => {
+    for (const p of [
+      "/vendor/", "/vendor", "/vendor/other.js", "/vendor/typescript.js.map", "/vendor/../server/main.ts",
+      "/vendor/%2e%2e/package.json", "/vendor/typescript.js/..", "/assets/fonts/", "/assets/fonts/OFL.txt",
+      "/assets/fonts/x.woff", "/assets/fonts/x.ttf", "/assets/fonts/sub/x.woff2", "/assets/fonts/../../package.json",
+      "/assets/fonts/%2e%2e/%2e%2e/package.json", "/assets/fonts/nope.woff2", "/assets/fonts/x.woff2%00.png",
+    ]) assert.equal((await game("GET", p)).status, 404, p);
   });
 
   it("sirve data/catalog.json y data/world.json desde el contenido del juego", async () => {

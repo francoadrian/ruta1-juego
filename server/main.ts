@@ -1,4 +1,4 @@
-// Ruta 1 — servidor del juego en Node/TS (port 1:1 de server.py; ADR 0002, paso 5). Solo node:*, sin dependencias.
+// Ruta 1 — servidor del juego en Node/TS (ADR 0002, paso 5). Solo node:*, sin dependencias.
 //
 //   node server/main.ts            → http://localhost:8123/
 //   node server/main.ts 8127       → mismo, en otro puerto (1er argumento numérico)
@@ -24,7 +24,7 @@
 //
 // WebSocket: GET /ws (ver server/ws.ts: TURN_SECONDS, GRACE_SECONDS, CHALLENGE_SECONDS, NPC_STEP_MS, WS_*).
 //
-// Configuración (variables de entorno, las mismas que server.py):
+// Configuración (variables de entorno, ver también docs/hosting.md):
 //   GAME_HOST / GAME_PORT   listener público (127.0.0.1:8123; 0.0.0.0 solo para LAN); el puerto también va como 1er argumento
 //   ALLOWED_HOSTS           nombres de Host permitidos, separados por comas (por defecto loopback); admite *.ts.net y *
 //   ALLOWED_ORIGINS         Origins permitidos (esquema://host[:puerto], admite https://*.ts.net); sin esto, vale
@@ -43,7 +43,7 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
-import { realpathSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { cli as adminCli, makeAdminServer } from "./admin.ts";
 import { Content } from "./content.ts";
@@ -88,7 +88,9 @@ function clientIp(req: IncomingMessage): string {
 }
 
 // Solo se publica lo que el juego necesita (nunca la base de datos).
-const PUBLIC = /^\/(index\.html|src\/[\w.-]+\.ts|assets\/[\w.-]+(\/[\w.-]+)*\.(png|jpe?g|webp|gif)|data\/(catalog|world)\.json)$/i;
+// - /vendor/typescript.js: el compilador que usa el navegador (lo genera `node tools/vendor.mjs`; ver ensureVendor)
+// - /assets/fonts/*.woff2: solo fuentes directamente en esa carpeta (las imágenes subidas siguen siendo solo imágenes)
+const PUBLIC = /^\/(index\.html|vendor\/typescript\.js|src\/[\w.-]+\.ts|assets\/fonts\/[\w.-]+\.woff2|assets\/[\w.-]+(\/[\w.-]+)*\.(png|jpe?g|webp|gif)|data\/(catalog|world)\.json)$/i;
 const MAX_BODY = 2_000_000;
 
 const TYPES: Record<string, string> = {
@@ -99,7 +101,13 @@ const TYPES: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".webp": "image/webp",
   ".gif": "image/gif",
+  ".js": "text/javascript; charset=utf-8", // solo vendor/typescript.js (lo permite PUBLIC)
+  ".woff2": "font/woff2",
 };
+
+/** Caché del navegador para lo que no cambia con el contenido del juego (typescript.js pesa ~9 MB: no bajarlo en cada visita). */
+const CACHEABLE = /^\/(vendor\/typescript\.js|assets\/fonts\/[\w.-]+\.woff2)$/i;
+const CACHE_CONTROL = "public, max-age=604800"; // 1 semana; con ETag el navegador revalida barato y una versión nueva entra sola
 
 /** Ruta pública ya decodificada y validada, o null. Rechaza ':', '\\', NUL, '..' y '//'. */
 export function safePublicPath(raw: string): string | null {
@@ -123,8 +131,8 @@ function sendJson(res: ServerResponse, status: number, obj: unknown): void {
   res.end(body);
 }
 
-function sendBytes(res: ServerResponse, ctype: string, body: Buffer, head: boolean): void {
-  res.writeHead(200, { ...BASE_HEADERS, "Content-Type": ctype, "Content-Length": body.length });
+function sendBytes(res: ServerResponse, ctype: string, body: Buffer, head: boolean, extra: Record<string, string> = {}): void {
+  res.writeHead(200, { ...BASE_HEADERS, ...extra, "Content-Type": ctype, "Content-Length": body.length });
   res.end(head ? undefined : body);
 }
 
@@ -153,7 +161,7 @@ const unauthorized = (res: ServerResponse): void => sendJson(res, 401, { error: 
 // ------------------------------------------------------------------ estáticos
 /** Archivo en disco para una ruta pública (null = no existe o fuera de la carpeta permitida). */
 function filePathFor(p: string): string | null {
-  if (p.startsWith("/assets/")) {
+  if (p.startsWith("/assets/") && !p.startsWith("/assets/fonts/")) {
     // /assets/* sale de GAME_ASSETS_DIR (puede estar fuera de la raíz del repo)
     try {
       const base = realpathSync(ASSETS);
@@ -163,10 +171,10 @@ function filePathFor(p: string): string | null {
       return null;
     }
   }
-  return path.join(ROOT, p.slice(1));
+  return path.join(ROOT, p.slice(1)); // incluye /assets/fonts/ (se maneja antes) y /vendor/
 }
 
-async function servePublic(res: ServerResponse, p: string, head: boolean): Promise<void> {
+async function servePublic(req: IncomingMessage, res: ServerResponse, p: string, head: boolean): Promise<void> {
   const m = /^\/data\/(catalog|world)\.json$/.exec(p);
   if (m) { // salen de la caché del contenido (el juego es su dueño)
     const raw = (m[1] === "catalog" ? CONTENT.catalog : CONTENT.world).raw();
@@ -175,13 +183,23 @@ async function servePublic(res: ServerResponse, p: string, head: boolean): Promi
     return void res.end(head ? undefined : raw);
   }
   const f = filePathFor(p);
-  let ok = false;
-  try { ok = f !== null && statSync(f).isFile(); } catch { /* no existe */ }
-  if (!ok || f === null) return notFound(res, head);
+  let size = -1;
+  let mtime = 0;
+  try { const st = f === null ? null : statSync(f); if (st?.isFile()) { size = st.size; mtime = st.mtimeMs; } } catch { /* no existe */ }
+  if (size < 0 || f === null) return notFound(res, head);
   const ctype = TYPES[path.extname(f).toLowerCase()];
   if (!ctype) return notFound(res, head);
+  let extra: Record<string, string> = {};
+  if (CACHEABLE.test(p)) {
+    const etag = `W/"${size.toString(16)}-${Math.floor(mtime).toString(16)}"`;
+    extra = { "Cache-Control": CACHE_CONTROL, ETag: etag };
+    if (req.headers["if-none-match"] === etag) {
+      res.writeHead(304, { ...BASE_HEADERS, ...extra });
+      return void res.end();
+    }
+  }
   try {
-    sendBytes(res, ctype, await readFile(f), head);
+    sendBytes(res, ctype, await readFile(f), head, extra);
   } catch {
     notFound(res, head);
   }
@@ -203,7 +221,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (method === "HEAD") {
     const p = apiPath.startsWith("/api/") ? null : safePublicPath(url);
     if (p === null) return notFound(res, true);
-    return servePublic(res, p, true);
+    return servePublic(req, res, p, true);
   }
 
   if (method === "GET") {
@@ -220,7 +238,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
     const p = safePublicPath(url);
     if (p === null) return notFound(res);
-    return servePublic(res, p, false);
+    return servePublic(req, res, p, false);
   }
 
   if (method === "POST") {
@@ -355,6 +373,20 @@ function inviteCli(args: string[], store: Store): number {
   return 2;
 }
 
+/** vendor/typescript.js lo necesita el navegador (/vendor/typescript.js). Si falta, se copia desde node_modules (como tools/vendor.mjs). */
+function ensureVendor(): void {
+  const out = path.join(ROOT, "vendor", "typescript.js");
+  if (existsSync(out)) return;
+  const src = path.join(ROOT, "node_modules", "typescript", "lib", "typescript.js");
+  if (!existsSync(src)) {
+    console.error('Falta vendor/typescript.js y typescript no está instalado. Corré "npm ci" y después "node tools/vendor.mjs".');
+    process.exit(1);
+  }
+  mkdirSync(path.dirname(out), { recursive: true });
+  copyFileSync(src, out);
+  console.log("vendor/typescript.js generado desde node_modules.");
+}
+
 function main(): void {
   if (argv[0] === "admin-token") {
     process.exitCode = adminCli(argv.slice(1), STORE); // sin process.exit: deja vaciar stdout
@@ -364,6 +396,7 @@ function main(): void {
     process.exitCode = inviteCli(argv.slice(1), STORE);
     return;
   }
+  ensureVendor();
   if (LAN_WARNING) {
     console.error(`ADVERTENCIA: el juego escucha en ${HOST} y ALLOWED_HOSTS no está definido: no se filtra el Host. ` +
       "Definí ALLOWED_HOSTS si lo exponés.");

@@ -7,6 +7,8 @@
     "node": ">=24"
   },
   "scripts": {
+    "start": "node --no-warnings server/main.ts",
+    "vendor": "node tools/vendor.mjs",
     "test": "node --test --no-warnings tests/engine.test.ts tests/view.test.ts tests/packs.test.ts tests/driver.test.ts",
     "test:api": "node --no-warnings tests/run-against-node.mjs",
     "test:server": "node --test --no-warnings tests/server.config.test.ts",
@@ -14,5 +16,8 @@
   },
   "dependencies": {
     "ws": "8.23.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   }
 }

@@ -267,10 +267,16 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     };
     challenges.set(id, c);
     send(to.conn, { type: "challenge.incoming", id, from: { id: me.id, name: me.name }, prizes, expires: sec(c.expires) });
+    // al que desafía le confirmamos el envío con el id (para poder cancelar por id)
+    send(conn, { type: "challenge.update", id, status: "pending", to: to.id, expires: sec(c.expires) });
   }
 
   function onChallengeReply(conn: Conn, me: Peer, type: string, msg: any): void {
-    const c = typeof msg.id === "string" ? challenges.get(msg.id) : undefined;
+    let c = typeof msg.id === "string" ? challenges.get(msg.id) : undefined;
+    // cancel sin id: se busca el desafío pendiente de este jugador hacia `to`
+    if (!c && type === "challenge.cancel" && typeof msg.id !== "string" && typeof msg.to === "string") {
+      c = [...challenges.values()].find((x) => x.from === me.id && x.to === msg.to);
+    }
     if (!c) return err(conn, type, "Ese desafío ya no existe.");
     if (type === "challenge.cancel") {
       if (c.from !== me.id) return err(conn, type, "Ese desafío no es tuyo.");

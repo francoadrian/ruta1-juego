@@ -3,18 +3,19 @@
   "configurations": [
     {
       "name": "ruta",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": "node",
       "runtimeArgs": [
-        "server.py"
+        "--no-warnings",
+        "server/main.ts"
       ],
       "port": 8123
     },
     {
       "name": "juego-prueba",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": "node",
       "runtimeArgs": [
-        "server.py",
-        "8127"
+        "--no-warnings",
+        "tools/prueba.mjs"
       ],
       "port": 8127
     }

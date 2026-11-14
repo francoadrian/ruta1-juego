@@ -478,6 +478,9 @@ describe("WebSocket: lobby, desafíos y cola", () => {
     a.send({ type: "challenge.decline", id: inc.id });
     await a.take("error");
     b.send({ type: "challenge.decline", id: inc.id });
+    // al que desafía el servidor le confirma el envío con el id
+    const pend = await a.take("challenge.update");
+    assert.deepEqual([pend.id, pend.status, pend.to], [inc.id, "pending", pb.id]);
     assert.equal((await a.take("challenge.update")).status, "declined");
     assert.equal((await b.take("challenge.update")).status, "declined");
 
@@ -485,11 +488,24 @@ describe("WebSocket: lobby, desafíos y cola", () => {
     const inc2 = await b.take("challenge.incoming");
     a.send({ type: "challenge.cancel", id: inc2.id });
     assert.equal((await b.take("challenge.update")).status, "cancelled");
-    await a.take("challenge.update");
+    assert.equal((await a.take("challenge.update")).status, "pending");
+    assert.equal((await a.take("challenge.update")).status, "cancelled");
+
+    // cancel sin id, solo con `to` (el cliente todavía no vio el id)
+    a.send({ type: "challenge.send", to: pb.id, deckId: "d1" });
+    const incB = await b.take("challenge.incoming");
+    a.send({ type: "challenge.cancel", to: pb.id });
+    const cb = await b.take((m) => m.type === "challenge.update" && m.status === "cancelled");
+    assert.equal(cb.id, incB.id);
+    const ca = await a.take((m) => m.type === "challenge.update" && m.status === "cancelled");
+    assert.equal(ca.id, incB.id);
+    // cancel sin id y a quien no desafiaste: error
+    a.send({ type: "challenge.cancel", to: pb.id });
+    assert.match((await a.take("error")).error, /ya no existe/);
 
     a.send({ type: "challenge.send", to: pb.id, deckId: "d1" });
     const inc3 = await b.take("challenge.incoming");
-    const u = await a.take((m) => m.type === "challenge.update" && m.id === inc3.id, 6000);
+    const u = await a.take((m) => m.type === "challenge.update" && m.id === inc3.id && m.status !== "pending", 6000);
     assert.equal(u.status, "expired");
     b.send({ type: "challenge.accept", id: inc3.id, deckId: "d1" });
     assert.match((await b.take("error")).error, /ya no existe/);
@@ -576,7 +592,7 @@ describe("WebSocket: lobby, desafíos y cola", () => {
     assert.equal(sa.view.p[0].hand.length, 7);
     assert.equal(sa.waiting, "you");
     assert.ok(sa.deadline > Date.now() / 1000);
-    assert.equal((await a.take("challenge.update")).status, "accepted");
+    assert.equal((await a.take((m) => m.type === "challenge.update" && m.status === "accepted")).status, "accepted");
     assert.equal((await b.take("challenge.update")).status, "accepted");
     // en el lobby, los dos figuran jugando
     const c = await Client.login(s.port, pc);

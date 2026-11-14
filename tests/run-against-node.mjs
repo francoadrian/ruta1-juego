@@ -6,7 +6,7 @@
 //   - tokens de admin creados con el CLI (`node server/main.ts admin-token new --write`), uno de ellos revocado
 //
 //   node tests/run-against-node.mjs
-//   (análogo a run-against-python.mjs; el mismo test debe pasar contra los dos servidores)
+//   (corre solo contra el servidor Node; el viejo servidor Python ya no existe)
 //   Los argumentos extra pasan a `node --test` (p. ej. --test-name-pattern=estáticos).
 
 import { spawn, spawnSync } from "node:child_process";
