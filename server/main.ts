@@ -22,6 +22,8 @@
 // Tokens de admin:  node server/main.ts admin-token new [etiqueta] [--write] | list | revoke <id>
 // Invitaciones:     node server/main.ts invite new [--uses N] [--days N] [etiqueta] | list | revoke <código>
 //
+// WebSocket: GET /ws (ver server/ws.ts: TURN_SECONDS, GRACE_SECONDS, CHALLENGE_SECONDS, NPC_STEP_MS, WS_*).
+//
 // Configuración (variables de entorno, las mismas que server.py):
 //   GAME_HOST / GAME_PORT   listener público (127.0.0.1:8123; 0.0.0.0 solo para LAN); el puerto también va como 1er argumento
 //   ALLOWED_HOSTS           nombres de Host permitidos, separados por comas (por defecto loopback); admite *.ts.net y *
@@ -49,6 +51,7 @@ import { validateDecks } from "./decks.ts";
 import { Engine } from "./engine.ts";
 import { FailureBudget, RateLimiter, accessFromEnv } from "./security.ts";
 import { Conflict, InviteError, MailGone, PlayersFull, Store } from "./store.ts";
+import { attachWs } from "./ws.ts";
 import { ValueError, isObj, parseJson, pyInt, readBytes } from "./util.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
@@ -391,7 +394,9 @@ function main(): void {
   });
   srv.on("error", onError("el juego"));
   srv.listen(PORT, HOST, () => console.log(`Juego en http://${HOST === "127.0.0.1" ? "localhost" : HOST}:${PORT}/  (Ctrl+C para cerrar)`));
-  const bye = () => { srv.close(); admin.close(); STORE.close(); process.exit(0); };
+  // WebSocket /ws (ADR 0002, 3.2): lobby, desafíos, cola y partidas; el upgrade valida Host y Origin antes de aceptar
+  const ws = attachWs(srv, { store: STORE, content: CONTENT, engine: ENGINE, access: ACCESS, clientIp });
+  const bye = () => { ws.close(); srv.close(); admin.close(); STORE.close(); process.exit(0); };
   process.on("SIGINT", bye);
   process.on("SIGTERM", bye);
 }

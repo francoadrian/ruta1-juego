@@ -379,6 +379,70 @@ export class Store {
     });
   }
 
+  // ------------------------------------------------------------ partidas (ADR 0002, 3.4)
+  /** Registra una partida que arranca. Lanza si el id ya existe (el que llama prueba con otro). */
+  matchStart(m: { id: string; kind: "pvp" | "npc"; p0: string; p1: string; seed: string; catalogRev: string | null; decks: unknown }): void {
+    this.tx(() => this.run(
+      "INSERT INTO matches (id, kind, p0, p1, seed, catalog_rev, decks, started) VALUES (?,?,?,?,?,?,?,?)",
+      m.id, m.kind, m.p0, m.p1, m.seed, m.catalogRev, JSON.stringify(m.decks), now(),
+    ));
+  }
+
+  /** Guarda el log de intenciones (para depurar o reproducir). */
+  matchIntents(id: string, intents: unknown): void {
+    this.tx(() => this.run("UPDATE matches SET intents=? WHERE id=? AND ended IS NULL", JSON.stringify(intents), id));
+  }
+
+  /** Cierra una partida. winner: 0/1 (asiento), 2 empate, null anulada. */
+  matchEnd(id: string, winner: number | null, reason: string, reward: unknown, intents: unknown): void {
+    this.tx(() => this.run(
+      "UPDATE matches SET ended=?, winner=?, reason=?, reward=?, intents=? WHERE id=?",
+      now(), winner, reason, reward === null ? null : JSON.stringify(reward), JSON.stringify(intents), id,
+    ));
+  }
+
+  /** Al arrancar: las partidas que quedaron abiertas (reinicio del servidor) se anulan sin resultado. Devuelve cuántas. */
+  voidOpenMatches(): number {
+    return this.tx(() => this.run("UPDATE matches SET ended=?, reason='void' WHERE ended IS NULL", now()).changes);
+  }
+
+  /** Estadística de PvP de un jugador (el PvP no da cartas). */
+  pvpStats(pid: string): { played: number; won: number; lost: number; drawn: number } {
+    const rows = this.all("SELECT p0, winner FROM matches WHERE kind='pvp' AND reason<>'void' AND ended IS NOT NULL AND (p0=? OR p1=?)", pid, pid);
+    let won = 0, lost = 0, drawn = 0;
+    for (const r of rows) {
+      if (r.winner === 2) drawn++;
+      else if (r.winner === null) continue;
+      else if ((r.winner === 0) === (r.p0 === pid)) won++;
+      else lost++;
+    }
+    return { played: won + lost + drawn, won, lost, drawn };
+  }
+
+  /**
+   * Victoria contra un NPC (la decide el servidor): suma 1 a `defeated[npcId]` y, si `makeCards(before)` devuelve cartas,
+   * las suma a la colección, todo en UNA transacción con rev+1. `before` = veces ganadas antes de esta.
+   */
+  npcWin(pid: string, npcId: string, makeCards: (before: number) => string[] | null): { defeated: number; cards: string[] | null; player: Record<string, any> } {
+    return this.tx(() => {
+      let row = this.get("SELECT * FROM players WHERE id=?", pid);
+      if (!row) throw new Error(`jugador inexistente: ${pid}`);
+      const save = JSON.parse(row.save || "{}");
+      if (!isObj(save.defeated)) save.defeated = {};
+      const before = Object.hasOwn(save.defeated, npcId) && Number.isSafeInteger(save.defeated[npcId]) ? save.defeated[npcId] as number : 0;
+      setOwn(save.defeated, npcId, before + 1);
+      const cards = makeCards(before);
+      if (cards && cards.length) {
+        if (!isObj(save.collection)) save.collection = {};
+        const col = save.collection as Record<string, number>;
+        for (const cid of cards) setOwn(col, cid, (Object.hasOwn(col, cid) ? col[cid] : 0) + 1);
+      }
+      this.run("UPDATE players SET save=?, rev=rev+1, last_seen=? WHERE id=?", JSON.stringify(save), now(), pid);
+      row = this.get("SELECT * FROM players WHERE id=?", pid)!;
+      return { defeated: before + 1, cards: cards && cards.length ? cards : null, player: this.player(row) };
+    });
+  }
+
   // ------------------------------------------------------------ tokens de admin
   /** Crea un token de admin. Devuelve [id, token]; el token en claro no se guarda. */
   createAdminToken(label = ""): [number, string] {

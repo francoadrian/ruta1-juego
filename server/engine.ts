@@ -23,7 +23,7 @@ const CORE_FILES = ["baseset", "cards", "rng", "tcg", "ai", "packs", "match"].ma
 const EXPORTS = [
   "CARDS", "BOOSTERS", "DEFAULT_SLOTS", "BRUSHFIRE", "OVERGROWTH", "BENCH_MAX", "DECK_SIZE", "DECK_NAME_MAX",
   "isPlayable", "isBasicEnergy", "isBasic", "ownedCounts", "deckProblems", "shuffle", "newBattle", "generateBooster",
-  "createMatch", "applyIntent", "viewFor", "defaultIntent", "stepAI",
+  "createMatch", "applyIntent", "viewFor", "defaultIntent", "stepAI", "peek", "logSince",
 ].join(", ");
 
 export interface Rng {
@@ -102,5 +102,21 @@ export class Engine {
     const def = this.content.boosterDef(boosterId);
     if (!def || def.enabled === false || !Array.isArray(def.cards)) return null;
     return [...this.core().generateBooster(def, serverRng())] as string[];
+  }
+
+  /** Sobre de premio de un NPC: `boosterId` o "random" (uno de los habilitados). null si no existe o no tiene cartas. */
+  rewardBooster(boosterId: string, rng: Rng = serverRng()): { booster: string; cards: string[] } | null {
+    const core = this.core();
+    let def: any;
+    if (boosterId === "random") {
+      const list: any[] = [...core.BOOSTERS];
+      def = list.length ? list[Math.min(list.length - 1, Math.floor(rng.next() * list.length))] : null;
+    } else {
+      def = this.content.boosterDef(boosterId);
+      if (def && def.enabled === false) def = null;
+    }
+    if (!def || !Array.isArray(def.cards)) return null;
+    const cards = [...core.generateBooster(def, rng)] as string[];
+    return cards.length ? { booster: String(def.id), cards } : null;
   }
 }
