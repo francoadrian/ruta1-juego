@@ -79,6 +79,8 @@ interface Battle {
   phase: Phase;
   winner: number; // 0 / 1 / 2 = empate / -1 = sin terminar
   log: string[];
+  /** Cuántas líneas de log se escribieron en total (`log` guarda solo las últimas 80): sirve para pedir "lo nuevo desde N". */
+  logCount: number;
   promoteQueue: number[];
   after: After | null;
   first: 0 | 1;
@@ -134,6 +136,7 @@ const isBasic = (c: Card): c is PokemonCard => c.kind === "pokemon" && c.stage =
 
 function log(b: Battle, msg: string): void {
   b.log.push(msg);
+  b.logCount++;
   if (b.log.length > 80) b.log.shift();
 }
 
@@ -209,14 +212,18 @@ function newBattle(decks: [Deck, Deck], names: [string, string], opts: NewBattle
   const b: Battle = {
     p: [newPlayer(decks[0], names[0], ai[0], rng), newPlayer(decks[1], names[1], ai[1], rng)],
     cur: 0, turn: 0, energyPlayed: false, retreated: false, phase: "setup",
-    winner: -1, log: [], promoteQueue: [], after: null, first: 0, prizeCount: opts.prizes ?? PRIZES,
+    winner: -1, log: [], logCount: 0, promoteQueue: [], after: null, first: 0, prizeCount: opts.prizes ?? PRIZES,
     rng, uidNext: 1,
   };
   // rng y uidNext son estado interno: no viajan en JSON.
   Object.defineProperty(b, "rng", { enumerable: false });
   Object.defineProperty(b, "uidNext", { enumerable: false });
-  // uids por partida, asignados DESPUÉS de mezclar: el uid no revela la posición original en el mazo.
-  for (const p of b.p) for (const c of p.deck) c.uid = b.uidNext++;
+  // uids por partida, asignados DESPUÉS de mezclar y sin relación con la posición en el mazo: una permutación al azar
+  // de 1..N (si se repartieran en orden, el uid de una carta jugada delataría dónde estaba en el mazo y en los Premios).
+  const total = b.p[0].deck.length + b.p[1].deck.length;
+  const uids = shuffle(Array.from({ length: total }, (_, i) => i + 1), rng);
+  for (const p of b.p) for (const c of p.deck) c.uid = uids.pop()!;
+  b.uidNext = total + 1;
   log(b, `Comienza la partida: ${decks[0].name} vs ${decks[1].name}.`);
   for (const p of b.p) {
     draw(p, 7);
@@ -940,7 +947,8 @@ function runTrainerStep(x: TrainerCtx, st: Step, pk: TPick): void {
       for (const c of list) removeFrom(p.deck, c);
       p.hand.push(...list);
       shuffle(p.deck, b.rng);
-      log(b, `${p.name} busca ${list.map((c) => c.c.name).join(" y ") || "nada"} en su mazo.`);
+      // sin nombres: el log lo ven los dos jugadores y lo que se busca en el mazo es información oculta
+      log(b, `${p.name} busca ${list.length} carta(s) en su mazo.`);
       break;
     }
     case "fromDiscard": {
