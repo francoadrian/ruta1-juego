@@ -77,21 +77,10 @@ function resetBooster(onDone: () => void, extra: Partial<typeof BO>): void {
   });
 }
 
-/** Regalo de un NPC: un sobre (el indicado o uno al azar) que se abre en el momento. */
-function startBooster(onDone: () => void, boosterId?: string, title = "¡Te dieron un sobre!"): void {
-  currentBooster = (boosterId && boosterById(boosterId)) || BOOSTERS[Math.floor(Math.random() * BOOSTERS.length)] || null;
-  if (!currentBooster) {
-    onDone(); // no hay sobres habilitados
-    return;
-  }
-  const cards = generateBooster(currentBooster, sfc32(randomSeed()));
-  resetBooster(onDone, { cards, isNew: newFlags(cards), title });
-}
-
-/** Sobre del buzón: las cartas ya están elegidas y sumadas en el servidor. */
-function openMailBooster(def: BoosterDef, cards: string[], isNew: boolean[], onDone: () => void): void {
+/** Sobre que sorteó el servidor (buzón o premio de un NPC): las cartas ya son del jugador; acá solo se muestra la apertura. */
+function openMailBooster(def: BoosterDef, cards: string[], isNew: boolean[], onDone: () => void, title = "¡Llegó un sobre a tu buzón!"): void {
   currentBooster = def;
-  resetBooster(onDone, { cards, isNew, claimed: true, title: "¡Llegó un sobre a tu buzón!" });
+  resetBooster(onDone, { cards, isNew, claimed: true, title });
 }
 
 /** Cartas sueltas del buzón: se dan vuelta de a una (en tandas de hasta 12). */
@@ -180,7 +169,6 @@ function updateBooster(dt: number): void {
         }
       }
       if (BO.tear >= 1) {
-        if (!BO.claimed) addToCollection(BO.cards); // ¡las cartas ya son del jugador!
         BO.phase = "burst";
         BO.t = 0;
         BO.flash = 1;

@@ -7,9 +7,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="theme-color" content="#1c1c24">
   <title>Ruta 1</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
   <style>
+    /* Fuente local (Press Start 2P, SIL OFL 1.1): el navegador no le pide nada a Google */
+    @font-face { font-family: "Press Start 2P"; font-style: normal; font-weight: 400; font-display: swap;
+      src: url(assets/fonts/press-start-2p-latin.woff2) format("woff2");
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
     html, body { margin: 0; height: 100%; background: #1c1c24; color: #c8c8d0; }
     body { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
            font: 10px "Press Start 2P", monospace; overflow: hidden;
@@ -22,6 +24,21 @@
     #pad { display: none; }
     #typeInput { position: fixed; left: -1000px; top: 0; opacity: 0; }
     #typeBtn { display: none; }
+
+    /* ---------- alta con código de invitación ---------- */
+    #signup { display: none; position: fixed; inset: 0; z-index: 10; background: #1c1c24; align-items: center; justify-content: center; }
+    #signup.show { display: flex; }
+    #signup form { width: min(420px, calc(100vw - 32px)); display: flex; flex-direction: column; gap: 14px;
+      padding: 22px; background: #283850; border: 4px solid #f0c040; border-radius: 10px; }
+    #signup h1 { margin: 0; font-size: 14px; color: #f8f8f8; text-align: center; }
+    #signup label { display: flex; flex-direction: column; gap: 8px; font-size: 9px; color: #c0d0e8; }
+    #signup input { font: 12px "Press Start 2P", monospace; padding: 10px; background: #f8f8f8; color: #283850;
+      border: 3px solid #78b0c8; border-radius: 6px; -webkit-user-select: text; user-select: text; text-transform: uppercase; }
+    #signup input#suName { text-transform: none; }
+    #signup button { font: 12px "Press Start 2P", monospace; padding: 12px; background: #f0c040; color: #283850;
+      border: 0; border-radius: 8px; cursor: pointer; }
+    #signup button:disabled { opacity: .5; cursor: default; }
+    #signup .msg { min-height: 24px; font-size: 8px; line-height: 1.7; color: #f08080; text-align: center; }
 
     /* ---------- pantallas táctiles ---------- */
     body.touch { gap: 0; justify-content: flex-start; touch-action: none; }
@@ -74,6 +91,15 @@
   </style>
 </head>
 <body>
+  <div id="signup">
+    <form id="signupForm" autocomplete="off">
+      <h1>RUTA 1</h1>
+      <label>CÓDIGO DE INVITACIÓN<input id="suInvite" maxlength="32" spellcheck="false" autocapitalize="characters"></label>
+      <label>TU NOMBRE<input id="suName" maxlength="12" spellcheck="false" placeholder="(opcional)"></label>
+      <div class="msg" id="suMsg"></div>
+      <button type="submit" id="suBtn">ENTRAR</button>
+    </form>
+  </div>
   <div id="screen"><canvas id="game" width="960" height="640"></canvas></div>
   <div id="pad" aria-hidden="true">
     <div class="dpad"><i class="u"></i><i class="d"></i><i class="l"></i><i class="r"></i></div>
@@ -110,44 +136,79 @@
     document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
   </script>
 
-  <!-- Compila src/*.ts en el navegador (no hace falta Node instalado) -->
-  <script src="https://cdn.jsdelivr.net/npm/typescript@5.6.3/lib/typescript.js"></script>
+  <!-- Compila src/*.ts en el navegador. typescript.js lo sirve el propio servidor (vendor/: "npm ci && node tools/vendor.mjs"),
+       no un CDN: la versión queda fijada por package-lock.json -->
+  <script src="vendor/typescript.js"></script>
   <script>
   (() => {
     // Orden de carga (ADR 0002 3.1): núcleo sin DOM (cartas → rng → motor → IA → sobres) → jugador/red (DOM) → arte → mapa → menú → combate → sobres → buzón → táctil → arranque
     const FILES = ["src/baseset.ts", "src/cards.ts", "src/rng.ts", "src/tcg.ts", "src/ai.ts", "src/packs.ts", "src/match.ts", "src/player.ts", "src/driver.ts", "src/net.ts",
-      "src/art.ts", "src/game.ts", "src/menu.ts", "src/decks.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
+      "src/art.ts", "src/game.ts", "src/menu.ts", "src/decks.ts", "src/lobby.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
     const getJson = (url) => fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 
     // Catálogo y mundo del backoffice (opcionales): si no existen, se usan los de src/
     const catalog = getJson("data/catalog.json").then((c) => { window.GAME_CATALOG = c; });
     const world = getJson("data/world.json").then((w) => { window.GAME_WORLD = w; });
 
-    // Jugador: id propio en el servidor (server.py). El token secreto queda en este navegador.
+    // Jugador: id propio en el servidor. El token secreto queda en este navegador.
+    // El alta pide un código de invitación (ADR 0002): sale del fragmento #invite=CODIGO del link o se escribe acá.
     const TOKEN_KEY = "tcglocal.playerToken";
-    function localSave() {
-      const read = (k) => { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch { return null; } };
-      return {
-        collection: read("tcglocal.collection.v1") || {},
-        decks: read("tcglocal.decks.v1") || undefined,
-        defeated: (read("tcglocal.progress.v1") || {}).defeated || {},
-      };
+    const inviteInHash = () => {
+      const m = /[#&]invite=([^&]+)/.exec(location.hash);
+      try { return m ? decodeURIComponent(m[1]).trim() : ""; } catch { return ""; }
+    };
+    // el código no se queda en la barra de direcciones ni en el historial
+    const clearHash = () => { try { history.replaceState(null, "", location.pathname + location.search); } catch {} };
+    const $ = (id) => document.getElementById(id);
+    // Pantalla de alta: resuelve con {invite, name} cuando el jugador aprieta ENTRAR.
+    function askSignup(invite, msg) {
+      $("signup").classList.add("show");
+      $("suInvite").value = invite;
+      $("suMsg").textContent = msg;
+      $("suBtn").disabled = false;
+      (invite ? $("suName") : $("suInvite")).focus();
+      return new Promise((resolve) => {
+        $("signupForm").onsubmit = (e) => {
+          e.preventDefault();
+          const code = $("suInvite").value.trim();
+          if (!code) { $("suMsg").textContent = "Escribí el código de invitación."; return; }
+          $("suBtn").disabled = true;
+          resolve({ invite: code, name: $("suName").value.trim() });
+        };
+      });
+    }
+    async function signup() {
+      let invite = inviteInHash();
+      let msg = "";
+      for (;;) {
+        const form = await askSignup(invite, msg);
+        let r;
+        try {
+          r = await fetch("api/players", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ invite: form.invite, ...(form.name ? { name: form.name } : {}) }),
+          });
+        } catch { invite = form.invite; msg = "No hay conexión con el servidor."; continue; }
+        if (r.status === 201 || r.ok) {
+          const p = await r.json();
+          localStorage.setItem(TOKEN_KEY, p.token);
+          clearHash();
+          $("signup").classList.remove("show");
+          return p;
+        }
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 403) clearHash();
+        invite = r.status === 403 ? "" : form.invite;
+        msg = j.error || ("Error " + r.status);
+      }
     }
     const player = (async () => {
       try {
         const token = localStorage.getItem(TOKEN_KEY);
-        if (token) {
-          const r = await fetch("api/me", { headers: { "X-Player-Token": token }, cache: "no-store" });
-          if (r.ok) return { ...(await r.json()), token };
-          if (r.status !== 401) return null; // servidor sin API (por ejemplo, python -m http.server)
-        }
-        const r = await fetch("api/players", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ save: localSave() }),
-        });
-        if (!r.ok) return null;
-        const p = await r.json();
-        localStorage.setItem(TOKEN_KEY, p.token);
-        return p;
+        const r = await fetch("api/me", { headers: token ? { "X-Player-Token": token } : {}, cache: "no-store" });
+        if (r.ok && token) return { ...(await r.json()), token };
+        if (r.status !== 401) return null; // servidor sin API (por ejemplo, python -m http.server): se juega sin conexión
+        return await signup(); // sin jugador (o con token que el servidor no conoce): hace falta una invitación
       } catch {
         return null;
       }
@@ -168,7 +229,7 @@
       })
       .catch((e) => {
         document.getElementById("err").textContent =
-          "No se pudieron cargar los .ts. Abrilo con el servidor del juego: python server.py";
+          "No se pudieron cargar los .ts. Abrilo con el servidor del juego: node server/main.ts (y la primera vez: npm ci && node tools/vendor.mjs)";
         console.error(e);
       });
   })();

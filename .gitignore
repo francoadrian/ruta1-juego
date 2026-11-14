@@ -5,3 +5,7 @@ data/game.db-*
 .env
 
 node_modules/
+
+# Artefactos de instalación (node tools/vendor.mjs)
+vendor/
+node_modules/

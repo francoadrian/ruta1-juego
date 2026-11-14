@@ -68,19 +68,6 @@ function rebuildCollection(): void {
 }
 rebuildCollection();
 
-/** Suma cartas a la colección (por ejemplo, las de un sobre) y lo guarda. */
-function addToCollection(ids: string[]): void {
-  for (const id of ids) pulledCards[id] = (pulledCards[id] ?? 0) + 1;
-  try {
-    localStorage.setItem(COLLECTION_KEY, JSON.stringify(pulledCards));
-  } catch {
-    /* sin almacenamiento: dura hasta recargar */
-  }
-  rebuildCollection();
-  noteAdds(ids);
-  queueSave();
-}
-
 const ownedQty = (id: string): number => COLLECTION.find((e) => e.id === id)?.qty ?? 0;
 
 /** Copias que tiene el jugador de cada carta (para deckProblems). */

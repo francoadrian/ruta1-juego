@@ -42,6 +42,8 @@ const BT = {
   log: [] as string[],
   /** Cómo terminó (solo si lo informa el servidor). */
   result: null as MatchResult | null,
+  /** Veces que se apretó Z para salir sin que haya llegado el resultado del servidor. */
+  exitTries: 0,
   mode: "menu" as "menu" | "attack" | "pick" | "idle",
   menuCursor: 0,
   attackCursor: 0,
@@ -100,16 +102,17 @@ function npcDeck(n: NpcRt | null): Deck {
 
 const rivalName = (): string => BT.b?.p[RIVAL].name ?? game.opponent?.def.name ?? "RIVAL";
 
-function startBattle(prizes = PRIZES): void {
+/** `remote`: la partida la lleva el servidor (NPC o PvP); sin él, el motor corre acá (modo sin servidor). */
+function startBattle(prizes = PRIZES, remote?: BattleDriver): void {
   game.mode = "battle";
+  game.netWait = false;
   const opp = game.opponent;
-  // Modo local (offline): el motor corre en el cliente con una semilla propia. El paso 9 va a elegir el
-  // driver remoto cuando haya servidor: la UI de abajo no cambia.
-  const driver = createLocalDriver([mainDeck(), npcDeck(opp)], [playerName(), opp?.def.name ?? "RIVAL"], { prizes });
+  const driver = remote ?? createLocalDriver([mainDeck(), npcDeck(opp)], [playerName(), opp?.def.name ?? "RIVAL"], { prizes });
   BT.driver = driver;
   BT.b = null;
   BT.log = [];
   BT.result = null;
+  BT.exitTries = 0;
   BT.waiting = false;
   BT.peekPending = false;
   BT.mode = "idle";
@@ -124,11 +127,27 @@ function startBattle(prizes = PRIZES): void {
 
 function exitBattle(): void {
   const b = BT.b!;
-  BT.driver?.close();
+  const remote = BT.driver?.kind === "remote";
+  // el estado final puede llegar un instante antes que match.over (con el premio): se espera un poco
+  if (remote && !BT.result && ++BT.exitTries < 3) {
+    toast("Esperando el resultado...");
+    return;
+  }
+  const res = BT.result;
+  const vs = NET.matchVs;
+  if (remote) endRemoteMatch();
+  else BT.driver?.close();
   BT.driver = null;
   BT.b = null;
+  const result = b.winner === HUMAN ? "win" : b.winner === 2 ? "draw" : "lose";
+  if (remote && vs === "pvp") {
+    game.opponent = null;
+    game.mode = "menu";
+    menu.screen = "lobby";
+    return;
+  }
   game.mode = "explore";
-  finishNpcBattle(b.winner === HUMAN ? "win" : b.winner === 2 ? "draw" : "lose");
+  finishNpcBattle(result, res?.reward ?? null);
 }
 
 /** Qué hace la UI con lo que contesta el driver. */
@@ -168,6 +187,9 @@ function battleHandlers(): BattleHandlers {
     },
     onOver(res) {
       BT.result = res;
+    },
+    onOpp(status) {
+      toast(status === "disconnected" ? "Tu rival se desconectó. Lo esperamos un rato..." : "Tu rival volvió.");
     },
   };
 }

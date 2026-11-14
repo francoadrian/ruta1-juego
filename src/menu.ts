@@ -2,7 +2,7 @@
 //  Menú (ENTER): MAZO, COLECCIÓN y BUZÓN
 // =====================================================================
 
-type MenuScreen = "main" | "decks" | "deck" | "edit" | "collection" | "mail";
+type MenuScreen = "main" | "decks" | "deck" | "edit" | "collection" | "mail" | "lobby";
 
 const menu = {
   screen: "main" as MenuScreen,
@@ -23,6 +23,7 @@ const MAIN_OPTIONS = [
   { label: "MAZO", desc: "Armá, editá y elegí tu mazo principal." },
   { label: "COLECCIÓN", desc: "Mirá todas las cartas de tu colección." },
   { label: "BUZÓN", desc: "Cartas y sobres que te mandaron." },
+  { label: "RIVALES", desc: "Desafiá a otros jugadores en línea." },
   { label: "SALIR", desc: "Cerrar este menú." },
 ];
 
@@ -101,7 +102,8 @@ function updateMenu(): void {
           menu.zoom = false;
         }
         if (menu.mainCursor === 2) openMailbox();
-        if (menu.mainCursor === 3) closeMenu();
+        if (menu.mainCursor === 3) openLobby();
+        if (menu.mainCursor === 4) closeMenu();
       }
       break;
     }
@@ -127,6 +129,8 @@ function updateMenu(): void {
       return updateBinder(left, right, up, down, a, b);
     case "mail":
       return updateMailbox(up, down, a, b);
+    case "lobby":
+      return updateLobby(up, down, left, right, a, b);
   }
 }
 
@@ -541,6 +545,11 @@ function renderMainMenu(): void {
     const ty = y + 26 + i * rowH;
     if (i === menu.mainCursor) cursorArrow(x + 26, ty + 4, 20);
     text(opt.label, x + 58, ty, 22, "#484848", { shadow: "#d0d0c8" });
+    if (opt.label === "RIVALES" && NET.incoming.length) {
+      const bx = x + 58 + 22 * 7 + 18;
+      rrect(bx, ty - 4, 44, 30, 15, "#e04030", "#ffffff", 3);
+      text(String(Math.min(99, NET.incoming.length)), bx + 22, ty + 3, 14, "#ffffff", { align: "center" });
+    }
     if (opt.label === "BUZÓN" && NET.mail.length) {
       const bx = x + 58 + 22 * 5 + 18;
       rrect(bx, ty - 4, 44, 30, 15, "#e04030", "#ffffff", 3);
@@ -987,6 +996,9 @@ function renderMenu(): void {
     case "collection": return renderCollection();
     case "mail":
       renderMailbox();
+      return drawMenuToast();
+    case "lobby":
+      renderLobby();
       return drawMenuToast();
   }
 }

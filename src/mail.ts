@@ -36,22 +36,15 @@ async function openMailItem(m: MailItem): Promise<void> {
   if (MB.busy) return;
   MB.busy = true;
   try {
-    if (m.kind === "booster") {
-      const def = boosterById(m.payload.booster ?? "");
-      if (!def) return menuToast("Ese sobre ya no existe en el catálogo. Pedile al operador que te mande otro.");
-      const cards = generateBooster(def, sfc32(randomSeed())); // TODO paso 9: el sobre lo genera el servidor
-      const isNew = newFlags(cards);
-      const err = await claimMail(m, cards);
-      if (err) return menuToast(err);
-      openMailBooster(def, cards, isNew, backToMailbox);
-    } else {
-      const cards = (m.payload.cards ?? []).filter((id) => CARDS[id]);
-      const isNew = newFlags(cards);
-      const err = await claimMail(m);
-      if (err) return menuToast(err);
-      if (!cards.length) return menuToast("El envío no tenía cartas que existan en el juego.");
-      revealMailCards(cards, isNew, backToMailbox);
-    }
+    const def = m.kind === "booster" ? boosterById(m.payload.booster ?? "") : null;
+    if (m.kind === "booster" && !def) return menuToast("Ese sobre ya no existe en el catálogo. Pedile al operador que te mande otro.");
+    // el servidor sortea el sobre y devuelve las cartas: el cliente no elige nada
+    const r = await claimMail(m);
+    if (r.err) return menuToast(r.err);
+    const cards = r.cards ?? [];
+    if (!cards.length) return menuToast("El envío no tenía cartas que existan en el juego.");
+    if (def) openMailBooster(def, cards, r.isNew!, backToMailbox);
+    else revealMailCards(cards, r.isNew!, backToMailbox);
   } finally {
     MB.busy = false;
   }
@@ -109,7 +102,7 @@ function renderMailbox(): void {
   if (!NET.online) {
     rrect(80, 200, CW - 160, 150, 14, "#f8f8f8", "#404858", 4);
     text("SIN CONEXIÓN", CW / 2, 230, 16, "#c04030", { align: "center" });
-    wrapText("El buzón necesita el servidor del juego (python server.py). Así como está, el juego guarda solo en este navegador.", 10, CW - 220)
+    wrapText("El buzón necesita el servidor del juego (node server/main.ts). Así como está, el juego guarda solo en este navegador.", 10, CW - 220)
       .forEach((l, i) => text(l, CW / 2, 270 + i * 18, 10, "#404858", { align: "center" }));
     return;
   }

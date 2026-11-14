@@ -317,6 +317,7 @@ const game = {
   battlePrizes: 6,
   bannerT: 0,
   opponent: null as NpcRt | null, // con quién se juega la partida
+  netWait: false, // se pidió la partida al servidor y falta su match.start
   talking: null as NpcRt | null, // con quién se está hablando ("!" arriba)
   warpT: 0,
   warpTo: null as WorldWarp | null,
@@ -464,34 +465,78 @@ function talkTo(n: NpcRt): void {
   });
 }
 
-/** Al terminar la partida: lo que dice el NPC y el premio. */
-function finishNpcBattle(result: "win" | "lose" | "draw"): void {
+/** Pasó el destello: con servidor, la partida contra el NPC la crea el servidor (npc.start → match.start); sin él, corre acá. */
+function beginNpcBattle(): void {
+  const n = game.opponent;
+  if (!PLAYER || !NET.online || !n) return startBattle(game.battlePrizes);
+  if (game.netWait) return;
+  game.netWait = true;
+  void netStartNpc(n.def.id, game.battlePrizes, (why) => {
+    game.netWait = false;
+    abortNpcBattle(why);
+  });
+}
+
+/** No se pudo empezar la partida: se vuelve a hablar con el NPC con el motivo. */
+function abortNpcBattle(why: string): void {
   const n = game.opponent;
   game.opponent = null;
-  if (!n) return;
-  n.facing = OPPOSITE[player.facing];
-  game.talking = n;
+  game.mode = "explore";
+  if (n) {
+    n.facing = OPPOSITE[player.facing];
+    game.talking = n;
+  }
+  openDialog([why], () => {
+    if (n) n.facing = n.home;
+    game.talking = null;
+  });
+}
+
+/** Al terminar la partida: lo que dice el NPC y el premio (que decide el servidor y llega en match.over). */
+function finishNpcBattle(result: "win" | "lose" | "draw", reward: MatchResult["reward"] = null): void {
+  const n = game.opponent;
+  game.opponent = null;
+  const hasReward = !!reward?.cards?.length;
+  // ¿es la primera vez que gana? (para el diálogo); el progreso local se actualiza con lo que dice el servidor
+  const id = n?.def.id ?? "";
+  const before = id ? PROGRESS.defeated[id] ?? 0 : 0;
+  if (result === "win" && id) {
+    PROGRESS.defeated[id] = before + 1;
+    saveProgressLocal();
+  }
+  if (!n && !hasReward) return;
+  if (n) {
+    n.facing = OPPOSITE[player.facing];
+    game.talking = n;
+  }
   const back = () => {
-    n.facing = n.home;
+    if (n) n.facing = n.home;
     game.talking = null;
   };
-  const d = n.def.dialog;
+  const d = n?.def.dialog ?? { win: [], lose: [], draw: [], winAgain: [] };
   if (result !== "win") {
-    openDialog(npcSay(n, result === "draw" ? d.draw : d.lose, result === "draw" ? "¡Empate!" : "¡Te gané!"), back);
+    openDialog(npcSay(n!, result === "draw" ? d.draw : d.lose, result === "draw" ? "¡Empate!" : "¡Te gané!"), back);
     return;
   }
-  const before = PROGRESS.defeated[n.def.id] ?? 0;
-  PROGRESS.defeated[n.def.id] = before + 1;
-  queueSave();
-  const r = n.def.reward;
-  const give = !!r?.booster && !(r.once && before > 0);
-  if (!give) {
-    openDialog(npcSay(n, before > 0 && d.winAgain?.length ? d.winAgain : d.win, "¡Me ganaste!"), back);
+  if (!hasReward) {
+    // sin premio: ya lo ganó antes (once), no tiene o no hay conexión. Con servidor se refresca igual el progreso.
+    if (NET.online) void refreshPlayer();
+    openDialog(npcSay(n!, before > 0 && d.winAgain?.length ? d.winAgain : d.win, "¡Me ganaste!"), back);
     return;
   }
-  openDialog(npcSay(n, d.win, "¡Me ganaste! Tomá, este sobre es para vos."), () =>
-    startBooster(back, r!.booster === "random" ? undefined : r!.booster, `¡${n.def.name} te dio un sobre!`),
-  );
+  // el sobre ya lo sorteó el servidor y las cartas ya son del jugador: se calcula qué es nuevo ANTES de refrescar la colección
+  const cards = reward!.cards!.filter((c) => CARDS[c]);
+  const isNew = newFlags(cards);
+  const def = reward!.booster ? boosterById(reward!.booster) : null;
+  const title = n ? `¡${n.def.name} te dio un sobre!` : "¡Ganaste un sobre!";
+  const show = () => {
+    if (!cards.length) return back();
+    if (def) openMailBooster(def, cards, isNew, back, title);
+    else revealMailCards(cards, isNew, back);
+  };
+  const refreshed = refreshPlayer(); // corre mientras se lee el diálogo
+  if (n) openDialog(npcSay(n, d.win, "¡Me ganaste! Tomá, este sobre es para vos."), () => void refreshed.then(show));
+  else void refreshed.then(show);
 }
 
 function interact(): void {
@@ -812,9 +857,7 @@ function frame(now: number): void {
   else if (game.mode === "warp") updateWarp(dt);
   else if (game.mode === "flash") {
     game.flashT += dt;
-    if (game.flashT > 0.8) {
-      startBattle(game.battlePrizes);
-    }
+    if (game.flashT > 0.8) beginNpcBattle();
   }
   if (modeBefore !== "explore" && game.mode === "explore") interactLockUntil = game.time + INTERACT_LOCK;
   updatePlayer(dt);
@@ -833,5 +876,6 @@ function frame(now: number): void {
     renderChoice();
   }
   if (game.mode === "menu") renderMenu();
+  drawNetOverlay(); // avisos de red (desafíos, reloj de la partida, conexión)
   requestAnimationFrame(frame);
 }
