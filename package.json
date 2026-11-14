@@ -5,6 +5,8 @@
   "description": "Ruta 1: TCG pixel-art. Los scripts de src/ son globales (no módulos): no poner \"type\": \"module\".",
   "engines": { "node": ">=24" },
   "scripts": {
-    "test": "node --test --no-warnings tests/engine.test.ts tests/view.test.ts tests/packs.test.ts"
+    "test": "node --test --no-warnings tests/engine.test.ts tests/view.test.ts tests/packs.test.ts tests/driver.test.ts",
+    "test:api": "node --no-warnings tests/run-against-node.mjs",
+    "test:server": "node --test --no-warnings tests/server.config.test.ts"
   }
 }

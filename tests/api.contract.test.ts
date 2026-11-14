@@ -1,26 +1,29 @@
-// Tests de caracterización (caja negra) del servidor del juego.
+// Tests de contrato (caja negra) del servidor del juego (Node, server/main.ts). Hablan solo por HTTP.
 //
-// Fijan el comportamiento ACTUAL del servidor Python (server.py + juego/*.py) para poder
-// portarlo a Node (ADR 0002, paso 5) y comprobar que el contrato no cambió. Hablan solo por HTTP.
+// Nacieron como caracterización del servidor Python (ADR 0002, paso 4); el paso 6 cambió a propósito el alta
+// (invitaciones), los mazos (PUT /api/me/decks), PUT /api/me/save (410) y el claim de sobres (los sortea el servidor).
+// `/admin/v1` sigue idéntico. Lo que depende de variables de entorno del servidor (MAX_PLAYERS, límites, Host/Origin,
+// GAME_HOST por defecto) vive en tests/server.config.test.ts, que levanta sus propios servidores.
 //
 //   GAME_URL         juego público, p. ej. http://127.0.0.1:8123
 //   GAME_ADMIN_URL   listener de admin, p. ej. http://127.0.0.1:8125
 //   ADMIN_TOKEN      token de admin válido
+//   INVITE_CODE      invitación con muchos usos para dar de alta jugadores de prueba
+//   GAME_DB, GAME_DATA_DIR, GAME_ASSETS_DIR   (opcional) los del servidor: permiten crear invitaciones propias por CLI
 //   REVOKED_ADMIN_TOKEN   (opcional) token que ya fue revocado; sin él se saltea ese test
 //   ASSETS_QUOTA_MB       (opcional) tope de GAME_MAX_ASSETS_MB del servidor; sin él se saltea el 413 por cuota
 //
 // ATENCIÓN: estos tests ESCRIBEN (crean/borran jugadores, mandan buzón, suben imágenes y
 // reescriben catalog.json/world.json con el mismo contenido). Correrlos solo contra un servidor
-// de prueba con DB/datos temporales: usá tests/run-against-python.mjs.
-//
-// Los tests marcados `// CAMBIA en paso 6` describen comportamiento que el ADR 0002 modifica
-// (invitaciones, PUT /api/me/save → 410, claim de sobres en el servidor); hay que adaptarlos entonces.
+// de prueba con DB/datos temporales: usá tests/run-against-node.mjs.
 //
 // Solo sintaxis "borrable" de TypeScript (node ejecuta el .ts quitando tipos).
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 
 const need = (n: string): string => {
   const v = process.env[n];
@@ -31,6 +34,7 @@ const GAME = need("GAME_URL");
 const ADMIN = need("GAME_ADMIN_URL");
 const TOKEN = need("ADMIN_TOKEN");
 const REVOKED = process.env.REVOKED_ADMIN_TOKEN || "";
+const INVITE = need("INVITE_CODE");
 const QUOTA_MB = Number(process.env.ASSETS_QUOTA_MB || 0);
 
 // ---------------------------------------------------------------- HTTP crudo
@@ -94,11 +98,36 @@ const dataUrl = (mime: string, buf: Buffer | string) =>
 const uniq = () => Math.random().toString(36).slice(2, 8);
 
 const createdPlayers: string[] = [];
-async function newPlayer(save?: unknown) {
-  const r = await game("POST", "/api/players", { body: save === undefined ? {} : { save } });
+/** Alta con la invitación de prueba. `grant`: cartas que se le regalan por buzón (admin) y cobra, para tener colección. */
+async function newPlayer(opts: { grant?: string[]; name?: string } = {}) {
+  const r = await game("POST", "/api/players", { body: { invite: INVITE, name: opts.name } });
   assert.equal(r.status, 201, r.text);
   createdPlayers.push(r.json.id);
-  return { id: r.json.id as string, token: r.json.token as string, player: r.json };
+  const out = { id: r.json.id as string, token: r.json.token as string, player: r.json };
+  if (opts.grant?.length) {
+    await adm("POST", "/admin/v1/mail", { body: { to: [out.id], kind: "cards", cards: opts.grant } });
+    const mid = (await me(out.token, "GET", "/api/me/mail")).json.mail[0].id;
+    const c = await me(out.token, "POST", `/api/me/mail/${mid}/claim`, { body: {} });
+    assert.equal(c.status, 200, c.text);
+    out.player = c.json.player;
+  }
+  return out;
+}
+
+/** Invitación propia por CLI (contra la misma DB del servidor de prueba). Devuelve el código. */
+function cliInvite(...args: string[]): string {
+  const root = path.resolve(import.meta.dirname, "..");
+  const r = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", ...args], { cwd: root, env: process.env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
+  const m = /Código de invitación: ([A-Z2-9]{4}-[A-Z2-9]{4})/.exec(r.stdout);
+  assert.ok(m, r.stdout);
+  return m[1];
+}
+const canCli = !!process.env.GAME_DB;
+function cliInvite_revoke(code: string): void {
+  const root = path.resolve(import.meta.dirname, "..");
+  const r = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", "revoke", code], { cwd: root, env: process.env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr || r.stdout);
 }
 
 let catalog: any;       // data/catalog.json tal como lo sirve el juego
@@ -204,17 +233,15 @@ describe("estáticos: /assets solo sirve imágenes subidas", () => {
 
 // ================================================================== API de jugador
 describe("API de jugador: alta y consulta", () => {
-  // CAMBIA en paso 6: el alta exigirá {invite, name} (403 sin invitación válida, 429, 503 por MAX_PLAYERS)
-  // y la colección inicial la pondrá el servidor, ignorando `save`.
-  it("POST /api/players crea un jugador (201) con id, token, rev 1 y buzón vacío", async () => {
-    const r = await game("POST", "/api/players", { body: {} });
+  it("POST /api/players con invitación crea un jugador (201) con id, token, rev 1, nombre y buzón vacío", async () => {
+    const r = await game("POST", "/api/players", { body: { invite: INVITE, name: "  Tomi  " } });
     assert.equal(r.status, 201);
     createdPlayers.push(r.json.id);
     assert.match(r.json.id, /^J-[A-HJ-NP-Z2-9]{6}$/);
     assert.equal(typeof r.json.token, "string");
     assert.ok(r.json.token.length >= 20);
     assert.equal(r.json.rev, 1);
-    assert.match(r.json.name, /^Jugador \d+$/);
+    assert.equal(r.json.name, "Tomi");
     assert.deepEqual(r.json.mail, []);
     assert.deepEqual(r.json.save, { collection: {} });
     assert.equal(typeof r.json.created, "number");
@@ -223,29 +250,81 @@ describe("API de jugador: alta y consulta", () => {
     assert.equal(r.headers["content-type"], "application/json; charset=utf-8");
   });
 
-  // CAMBIA en paso 6: `save` pasa a ignorarse (arranca con la colección inicial del servidor).
-  it("POST /api/players acepta un save inicial y lo normaliza (descarta basura)", async () => {
-    const { player } = await newPlayer({
-      collection: { [CARD]: 3, malo: -1, cero: 0, texto: "5", flot: 1.5, enorme: 100000, ["x".repeat(80)]: 2 },
-      decks: { decks: [], mainId: null },
-      defeated: { "npc-a": 2, "npc-b": "x" },
-      extra: "se descarta",
-    });
-    assert.equal(player.save.collection[CARD], 3);
-    for (const k of ["malo", "cero", "texto", "flot", "enorme"]) assert.equal(k in player.save.collection, false, k);
-    assert.equal(player.save.collection["x".repeat(64)], 2); // clave truncada a 64
-    assert.deepEqual(player.save.decks, { decks: [], mainId: null });
-    assert.deepEqual(player.save.defeated, { "npc-a": 2 });
-    assert.equal("extra" in player.save, false);
+  it("el código se acepta en minúsculas y sin guion; sin nombre queda 'Jugador N'; el nombre se limpia y se recorta a 24", async () => {
+    const a = await game("POST", "/api/players", { body: { invite: INVITE.toLowerCase().replace("-", " ") } });
+    assert.equal(a.status, 201, a.text);
+    createdPlayers.push(a.json.id);
+    assert.match(a.json.name, /^Jugador \d+$/);
+    const b = await game("POST", "/api/players", { body: { invite: INVITE, name: "A\u0000B\n" + "x".repeat(40) } });
+    assert.equal(b.status, 201);
+    createdPlayers.push(b.json.id);
+    assert.equal(b.json.name, "AB" + "x".repeat(22));
   });
 
-  // CAMBIA en paso 6: el alta ignora `name`; con invitación el nombre sí vendrá en el body.
-  it("POST /api/players ignora `name` y un save que no es objeto", async () => {
-    const r = await game("POST", "/api/players", { body: { name: "Tomi", save: "basura" } });
+  it("sin invitación, o con una inválida, da 403 {error:'Código de invitación inválido o usado.'}", async () => {
+    for (const body of [{}, { name: "Tomi" }, { invite: "" }, { invite: "AAAA-BBBB" }, { invite: 12345 }, { invite: null }, { invite: ["x"] }, { invite: INVITE + "9" }]) {
+      const r = await game("POST", "/api/players", { body });
+      assert.equal(r.status, 403, JSON.stringify(body));
+      assert.deepEqual(r.json, { error: "Código de invitación inválido o usado." });
+    }
+  });
+
+  it("`save` y cualquier otro campo del cliente se ignoran: arranca con la colección vacía de `pulled`", async () => {
+    const r = await game("POST", "/api/players", {
+      body: { invite: INVITE, name: "Tomi", save: { collection: { [CARD]: 99 }, decks: { decks: [] }, defeated: { a: 1 } }, cards: [CARD], rev: 50, id: "J-AAAAAA" },
+    });
     assert.equal(r.status, 201);
     createdPlayers.push(r.json.id);
-    assert.match(r.json.name, /^Jugador \d+$/);
     assert.deepEqual(r.json.save, { collection: {} });
+    assert.equal(r.json.rev, 1);
+    assert.notEqual(r.json.id, "J-AAAAAA");
+    const g = await me(r.json.token, "GET", "/api/me");
+    assert.deepEqual(g.json.save, { collection: {} });
+  });
+
+  it("un nombre que no es texto da 400 y un cuerpo que no es objeto también", async () => {
+    assert.equal((await game("POST", "/api/players", { body: { invite: INVITE, name: 5 } })).status, 400);
+    assert.equal((await game("POST", "/api/players", { raw: "[1]" })).status, 400);
+    assert.equal((await game("POST", "/api/players", { raw: "\"x\"" })).status, 400);
+  });
+
+  it("una invitación de un solo uso se agota; una de N usos, también; el agotamiento no crea jugadores", { skip: !canCli && "falta GAME_DB (CLI)" }, async () => {
+    const code = cliInvite("new", "--uses", "2", "--days", "1", "test");
+    const ok1 = await game("POST", "/api/players", { body: { invite: code, name: "A" } });
+    const ok2 = await game("POST", "/api/players", { body: { invite: code, name: "B" } });
+    assert.equal(ok1.status, 201);
+    assert.equal(ok2.status, 201);
+    createdPlayers.push(ok1.json.id, ok2.json.id);
+    const no = await game("POST", "/api/players", { body: { invite: code, name: "C" } });
+    assert.equal(no.status, 403);
+    assert.deepEqual(no.json, { error: "Código de invitación inválido o usado." });
+  });
+
+  it("invitaciones concurrentes de un solo uso: exactamente un alta", { skip: !canCli && "falta GAME_DB (CLI)" }, async () => {
+    const code = cliInvite("new", "--uses", "1");
+    const rs = await Promise.all([1, 2, 3, 4, 5].map((n) => game("POST", "/api/players", { body: { invite: code, name: `P${n}` } })));
+    for (const r of rs) if (r.status === 201) createdPlayers.push(r.json.id);
+    assert.deepEqual(rs.map((r) => r.status).sort(), [201, 403, 403, 403, 403]);
+  });
+
+  it("una invitación revocada por CLI deja de servir", { skip: !canCli && "falta GAME_DB (CLI)" }, async () => {
+    const code = cliInvite("new");
+    cliInvite_revoke(code);
+    assert.equal((await game("POST", "/api/players", { body: { invite: code } })).status, 403);
+  });
+
+  it("el CLI no guarda ni lista el código en claro; `invite list` muestra id, estado y usos", { skip: !canCli && "falta GAME_DB (CLI)" }, async () => {
+    const code = cliInvite("new", "--uses", "3", "--days", "2", "para Fran");
+    const root = path.resolve(import.meta.dirname, "..");
+    const r = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", "list"], { cwd: root, env: process.env, encoding: "utf8" });
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.includes(code), false);
+    assert.equal(r.stdout.includes(code.replace("-", "")), false);
+    assert.match(r.stdout, /vigente\s+usos restantes: 3 .*para Fran/);
+    const bad = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", "new", "--uses", "0"], { cwd: root, env: process.env, encoding: "utf8" });
+    assert.notEqual(bad.status, 0);
+    const none = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", "revoke", "AAAA-BBBB"], { cwd: root, env: process.env, encoding: "utf8" });
+    assert.notEqual(none.status, 0);
   });
 
   it("POST con JSON inválido da 400 y un cuerpo declarado de más de 2 MB también", async () => {
@@ -258,11 +337,11 @@ describe("API de jugador: alta y consulta", () => {
   });
 
   it("GET /api/me devuelve el jugador con save y buzón; sin token o con token malo, 401", async () => {
-    const { id, token } = await newPlayer({ collection: { [CARD]: 1 } });
+    const { id, token } = await newPlayer({ grant: [CARD] });
     const r = await me(token, "GET", "/api/me");
+    assert.equal(r.json.rev, 2); // el claim del regalo subió la rev
     assert.equal(r.status, 200);
     assert.equal(r.json.id, id);
-    assert.equal(r.json.rev, 1);
     assert.deepEqual(r.json.save.collection, { [CARD]: 1 });
     assert.deepEqual(r.json.mail, []);
     assert.equal(JSON.stringify(r.json).includes("token_hash"), false);
@@ -296,65 +375,154 @@ describe("API de jugador: alta y consulta", () => {
   });
 });
 
-describe("API de jugador: PUT /api/me/save con rev", () => {
-  // CAMBIA en paso 6: PUT /api/me/save pasa a responder 410 {error:"Ahora el servidor guarda la colección; actualizá la página."}
-  // (y se agrega PUT /api/me/decks con el mismo esquema de rev/409).
-  it("guarda con la rev vigente, sube la rev y normaliza el save", async () => {
+describe("API de jugador: PUT /api/me/save (410) y PUT /api/me/decks", () => {
+  const NO_SAVE = { error: "Ahora el servidor guarda la colección; actualizá la página." };
+  const deck = (cards: Array<{ id: string; qty: number }>, extra: Record<string, unknown> = {}) =>
+    ({ decks: [{ id: "d1", name: "Fuego", cards }], mainId: "d1", nextId: 2, ...extra });
+  const putDecks = (token: string, rev: number, decks: unknown) => me(token, "PUT", "/api/me/decks", { body: { rev, decks } });
+
+  it("PUT /api/me/save responde 410 con el aviso, sin tocar nada (aunque la rev y el body sean 'válidos')", async () => {
     const { token } = await newPlayer();
-    const r = await me(token, "PUT", "/api/me/save", {
-      body: { rev: 1, save: { collection: { [CARD]: 2, malo: 0 }, decks: { decks: [{ id: "d1" }] }, defeated: { a: 1 } } },
-    });
-    assert.equal(r.status, 200);
-    assert.deepEqual(r.json, { rev: 2 });
+    for (const body of [{ rev: 1, save: { collection: { [CARD]: 50 } } }, {}, { rev: "abc" }]) {
+      const r = await me(token, "PUT", "/api/me/save", { body });
+      assert.equal(r.status, 410, JSON.stringify(body));
+      assert.deepEqual(r.json, NO_SAVE);
+    }
+    assert.equal((await me(token, "PUT", "/api/me/save", { raw: "{roto" })).status, 410);
     const g = await me(token, "GET", "/api/me");
-    assert.equal(g.json.rev, 2);
-    assert.deepEqual(g.json.save, { collection: { [CARD]: 2 }, decks: { decks: [{ id: "d1" }] }, defeated: { a: 1 } });
+    assert.equal(g.json.rev, 1);
+    assert.deepEqual(g.json.save, { collection: {} });
   });
 
-  // CAMBIA en paso 6 (pasa a 410)
-  it("con una rev vieja responde 409 {error:'conflict', player} con el estado vigente", async () => {
-    const { token, id } = await newPlayer({ collection: { [CARD]: 1 } });
-    assert.equal((await me(token, "PUT", "/api/me/save", { body: { rev: 1, save: { collection: { [CARD]: 5 } } } })).status, 200);
-    const r = await me(token, "PUT", "/api/me/save", { body: { rev: 1, save: { collection: { [CARD]: 9 } } } });
-    assert.equal(r.status, 409);
-    assert.equal(r.json.error, "conflict");
-    assert.equal(r.json.player.id, id);
-    assert.equal(r.json.player.rev, 2);
-    assert.deepEqual(r.json.player.save.collection, { [CARD]: 5 });
-    assert.equal((await me(token, "GET", "/api/me")).json.save.collection[CARD], 5); // no se pisó
-  });
-
-  // CAMBIA en paso 6 (pasa a 410)
-  it("sin rev (o con rev adelantada) responde 409; con rev no numérica, 400", async () => {
-    const { token } = await newPlayer();
-    assert.equal((await me(token, "PUT", "/api/me/save", { body: { save: {} } })).status, 409);
-    assert.equal((await me(token, "PUT", "/api/me/save", { body: { rev: 99, save: {} } })).status, 409);
-    assert.equal((await me(token, "PUT", "/api/me/save", { body: { rev: "abc", save: {} } })).status, 400);
-    assert.equal((await me(token, "PUT", "/api/me/save", { raw: "{roto" })).status, 400);
-  });
-
-  // CAMBIA en paso 6 (pasa a 410 también sin token válido, o se mantiene 401 según el orden de chequeo)
-  it("sin token responde 401 y otras rutas PUT dan 404", async () => {
+  it("sin token (o con token malo) PUT /api/me/save sigue dando 401; otras rutas PUT dan 404", async () => {
     assert.equal((await game("PUT", "/api/me/save", { body: { rev: 1, save: {} } })).status, 401);
+    assert.equal((await game("PUT", "/api/me/decks", { body: { rev: 1, decks: {} } })).status, 401);
     const { token } = await newPlayer();
     assert.equal((await me(token, "PUT", "/api/me", { body: {} })).status, 404);
   });
 
-  // CAMBIA en paso 6 (pasa a 410)
-  it("dos guardados concurrentes con la misma rev: exactamente uno gana", async () => {
+  it("el cliente no puede inventarse cartas: ni con `save`, ni con `collection`, ni con `cards` en ningún endpoint", async () => {
     const { token } = await newPlayer();
-    const rs = await Promise.all(
-      [1, 2, 3, 4].map((n) => me(token, "PUT", "/api/me/save", { body: { rev: 1, save: { collection: { [CARD]: n } } } })),
-    );
-    const codes = rs.map((r) => r.status).sort();
-    assert.deepEqual(codes, [200, 409, 409, 409]);
+    await me(token, "PUT", "/api/me/save", { body: { rev: 1, save: { collection: { [CARD]: 99 } }, collection: { [CARD]: 99 } } });
+    await putDecks(token, 1, deck([{ id: CARD, qty: 1 }], { collection: { [CARD]: 99 }, cards: [CARD] }));
+    const g = await me(token, "GET", "/api/me");
+    assert.deepEqual(g.json.save.collection, {});
+  });
+
+  it("guarda los mazos con la rev vigente, sube la rev y los devuelve normalizados en /api/me", async () => {
+    const { token } = await newPlayer();
+    const starter = (await me(token, "GET", "/api/me")).json; // sin mazos todavía
+    assert.equal("decks" in starter.save, false);
+    const r = await putDecks(token, 1, deck([{ id: "charmander", qty: 3 }], { basura: 1 }));
+    assert.equal(r.status, 200, r.text);
+    assert.deepEqual(r.json, { rev: 2 });
+    const g = await me(token, "GET", "/api/me");
+    assert.equal(g.json.rev, 2);
+    assert.deepEqual(g.json.save.decks, { decks: [{ id: "d1", name: "Fuego", cards: [{ id: "charmander", qty: 3 }] }], mainId: "d1", nextId: 2 });
+    assert.deepEqual(g.json.save.collection, {}); // los mazos no tocan la colección
+  });
+
+  it("mazos incompletos se guardan; mazos vacíos y sin mazo principal también", async () => {
+    const { token } = await newPlayer();
+    assert.equal((await putDecks(token, 1, { decks: [], mainId: null })).status, 200);
+    assert.equal((await putDecks(token, 2, deck([]))).status, 200);
+  });
+
+  it("con una rev vieja, adelantada o ausente responde 409 {error:'conflict', player}; rev no numérica, 400", async () => {
+    const { token, id } = await newPlayer();
+    assert.equal((await putDecks(token, 1, deck([]))).status, 200);
+    const old = await putDecks(token, 1, deck([{ id: "charmander", qty: 1 }]));
+    assert.equal(old.status, 409);
+    assert.equal(old.json.error, "conflict");
+    assert.equal(old.json.player.id, id);
+    assert.equal(old.json.player.rev, 2);
+    assert.deepEqual(old.json.player.save.decks.decks[0].cards, []); // no se pisó
+    assert.equal((await putDecks(token, 99, deck([]))).status, 409);
+    assert.equal((await me(token, "PUT", "/api/me/decks", { body: { decks: deck([]) } })).status, 409);
+    assert.equal((await me(token, "PUT", "/api/me/decks", { body: { rev: "abc", decks: deck([]) } })).status, 400);
+    assert.equal((await me(token, "PUT", "/api/me/decks", { raw: "{roto" })).status, 400);
+  });
+
+  it("rechaza con 400 una carta inexistente o de prototipo, más copias de las que tiene y cantidades inválidas", async () => {
+    const { token } = await newPlayer();
+    const bad: Array<[string, unknown]> = [
+      ["carta inexistente", deck([{ id: "no-existe-esta-carta", qty: 1 }])],
+      ["id de prototipo", deck([{ id: "constructor", qty: 1 }])],
+      ["__proto__", deck([{ id: "__proto__", qty: 1 }])],
+      ["más copias de las que tiene", deck([{ id: "charmander", qty: 60 }])],
+      ["copias repartidas en entradas repetidas", deck([{ id: "charmander", qty: 30 }, { id: "charmander", qty: 30 }])],
+      ["qty 0", deck([{ id: "charmander", qty: 0 }])],
+      ["qty negativa", deck([{ id: "charmander", qty: -1 }])],
+      ["qty fraccionaria", deck([{ id: "charmander", qty: 1.5 }])],
+      ["qty texto", deck([{ id: "charmander", qty: "2" }])],
+      ["entrada sin id", deck([{ qty: 1 } as any])],
+      ["cards no es lista", { decks: [{ id: "d1", name: "X", cards: "no" }], mainId: "d1" }],
+      ["mazo sin nombre", { decks: [{ id: "d1", name: "", cards: [] }], mainId: "d1" }],
+      ["nombre de más de 14", { decks: [{ id: "d1", name: "x".repeat(15), cards: [] }], mainId: "d1" }],
+      ["id de mazo inválido", { decks: [{ id: "a b!", name: "X", cards: [] }], mainId: null }],
+      ["ids de mazo repetidos", { decks: [{ id: "d1", name: "X", cards: [] }, { id: "d1", name: "Y", cards: [] }], mainId: "d1" }],
+      ["mainId inexistente", { decks: [{ id: "d1", name: "X", cards: [] }], mainId: "d9" }],
+      ["más de 60 entradas", deck(Array.from({ length: 61 }, () => ({ id: "charmander", qty: 1 })))],
+      ["más de 20 mazos", { decks: Array.from({ length: 21 }, (_, i) => ({ id: `d${i}`, name: "X", cards: [] })), mainId: null }],
+      ["decks no es objeto", "texto"],
+      ["decks sin lista", { mainId: "d1" }],
+    ];
+    for (const [why, decks] of bad) {
+      const r = await putDecks(token, 1, decks);
+      assert.equal(r.status, 400, `${why}: ${r.text}`);
+      assert.equal(typeof r.json.error, "string", why);
+    }
+    assert.equal((await me(token, "GET", "/api/me")).json.rev, 1); // nada se guardó ni subió la rev
+    assert.equal((await me(token, "PUT", "/api/me/decks", { body: { rev: 1 } })).status, 400);
+    assert.equal((await me(token, "PUT", "/api/me/decks", { raw: "[1]" })).status, 400);
+  });
+
+  it("20 mazos de 60 entradas es el máximo permitido", async () => {
+    const { token } = await newPlayer();
+    const decks = Array.from({ length: 20 }, (_, i) => ({ id: `d${i}`, name: "Mazo", cards: [{ id: "charmander", qty: 1 }] }));
+    assert.equal((await putDecks(token, 1, { decks, mainId: "d0", nextId: 21 })).status, 200);
+  });
+
+  it("las copias que se pueden poner son la colección inicial + lo ganado (un regalo suma al tope)", async () => {
+    const { id, token } = await newPlayer();
+    let rev = 1;
+    let max = 0; // tope inicial de charmander: se busca subiendo de a una
+    for (let q = 1; q <= 12; q++) {
+      const r = await putDecks(token, rev, deck([{ id: "charmander", qty: q }]));
+      if (r.status !== 200) { assert.equal(r.status, 400, r.text); break; }
+      rev = r.json.rev;
+      max = q;
+    }
+    assert.ok(max < 12, "tiene que haber un tope de copias");
+    await adm("POST", "/admin/v1/mail", { body: { to: [id], kind: "cards", cards: ["charmander", "charmander"] } });
+    const mid = (await me(token, "GET", "/api/me/mail")).json.mail[0].id;
+    assert.equal((await me(token, "POST", `/api/me/mail/${mid}/claim`, { body: {} })).status, 200);
+    rev++;
+    assert.equal((await putDecks(token, rev, deck([{ id: "charmander", qty: max + 3 }]))).status, 400);
+    assert.equal((await putDecks(token, rev, deck([{ id: "charmander", qty: max + 2 }]))).status, 200);
+  });
+
+  it("dos guardados de mazos concurrentes con la misma rev: exactamente uno gana", async () => {
+    const { token } = await newPlayer();
+    const rs = await Promise.all([1, 2, 3, 4].map((n) => putDecks(token, 1, { decks: [{ id: "d1", name: `M${n}`, cards: [] }], mainId: "d1" })));
+    assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409, 409, 409]);
+  });
+
+  it("el save en DB mantiene {collection, decks} y /admin/v1/players/<id> lo ve igual", async () => {
+    const { id, token } = await newPlayer({ grant: [CARD] });
+    const rev = (await me(token, "GET", "/api/me")).json.rev;
+    assert.equal((await putDecks(token, rev, deck([{ id: CARD, qty: 1 }]))).status, 200);
+    const a = await adm("GET", `/admin/v1/players/${id}`);
+    assert.deepEqual(Object.keys(a.json.save).sort(), ["collection", "decks"]);
+    assert.deepEqual(a.json.save.collection, { [CARD]: 1 });
+    assert.equal(a.json.save.decks.decks[0].id, "d1");
   });
 });
 
 // ================================================================== buzón
 describe("buzón: envíos de admin y claim", () => {
   it("un envío de cartas aparece en /api/me/mail y /api/me, y se cobra una sola vez", async () => {
-    const { id, token } = await newPlayer({ collection: { [CARD]: 1 } });
+    const { id, token } = await newPlayer({ grant: [CARD] });
     const s = await adm("POST", "/admin/v1/mail", {
       body: { to: [id], kind: "cards", cards: [CARD, CARD], message: "Regalo", sender: "Prof" },
     });
@@ -377,7 +545,8 @@ describe("buzón: envíos de admin y claim", () => {
     assert.equal(c.json.mail.id, m.id);
     assert.equal(typeof c.json.mail.claimed, "number");
     assert.deepEqual(c.json.mail.result, [CARD, CARD]);
-    assert.equal(c.json.player.rev, 2);
+    assert.deepEqual(c.json.cards, [CARD, CARD]);
+    assert.equal(c.json.player.rev, 3); // 1 alta + 1 regalo previo + este claim
     assert.equal(c.json.player.save.collection[CARD], 3);
 
     const again = await me(token, "POST", `/api/me/mail/${m.id}/claim`, { body: {} });
@@ -394,6 +563,7 @@ describe("buzón: envíos de admin y claim", () => {
     const c = await me(token, "POST", `/api/me/mail/${m.id}/claim`, { body: { cards: ["otra", "otra2"] } });
     assert.equal(c.status, 200);
     assert.deepEqual(c.json.player.save.collection, { [CARD]: 1 });
+    assert.deepEqual(c.json.cards, [CARD]);
   });
 
   it("claim: 401 sin token; 409 si el envío es de otro jugador o no existe; 404 si el id no es numérico", async () => {
@@ -417,12 +587,12 @@ describe("buzón: envíos de admin y claim", () => {
     assert.deepEqual((await me(token, "GET", "/api/me")).json.save.collection, { [CARD]: 1 });
   });
 
-  it("el claim sube la rev y un PUT /api/me/save con la rev anterior da 409 (no se pierde lo del buzón)", async () => {
+  it("el claim sube la rev y un PUT /api/me/decks con la rev anterior da 409 (no se pierde lo del buzón)", async () => {
     const { id, token } = await newPlayer();
     await adm("POST", "/admin/v1/mail", { body: { to: [id], kind: "cards", cards: [CARD] } });
     const mid = (await me(token, "GET", "/api/me/mail")).json.mail[0].id;
     assert.equal((await me(token, "POST", `/api/me/mail/${mid}/claim`, { body: {} })).status, 200);
-    const r = await me(token, "PUT", "/api/me/save", { body: { rev: 1, save: { collection: {} } } }); // CAMBIA en paso 6 (410)
+    const r = await me(token, "PUT", "/api/me/decks", { body: { rev: 1, decks: { decks: [], mainId: null } } });
     assert.equal(r.status, 409);
     assert.deepEqual(r.json.player.save.collection, { [CARD]: 1 });
   });
@@ -441,38 +611,60 @@ describe("buzón: envíos de admin y claim", () => {
     const claim = (p: { token: string; mid: number }, body: unknown) =>
       me(p.token, "POST", `/api/me/mail/${p.mid}/claim`, { body });
 
-    // CAMBIA en paso 6: el servidor sortea el sobre; el body se ignora y la respuesta trae `cards`.
-    it("con cartas del pool y cantidad válida, suma esas cartas a la colección", async () => {
+    const claimOnce = async () => {
       const p = await sendBooster();
-      const pick = (BOOSTER.cards as string[]).slice(0, size());
-      const c = await claim(p, { cards: pick });
-      assert.equal(c.status, 200);
-      assert.deepEqual(c.json.mail.result, pick);
-      const total = Object.values(c.json.player.save.collection as Record<string, number>).reduce((a, b) => a + b, 0);
-      assert.equal(total, pick.length);
+      const c = await claim(p, {});
+      assert.equal(c.status, 200, c.text);
+      return { p, c };
+    };
+
+    it("el servidor sortea el sobre: la respuesta trae `cards` del pool, con el tamaño de los slots, y se suman a la colección", async () => {
+      const { c } = await claimOnce();
+      const cards: string[] = c.json.cards;
+      assert.equal(cards.length, size());
+      const pool = new Set<string>(BOOSTER.cards);
+      for (const id of cards) assert.ok(pool.has(id), `${id} no es del sobre`);
+      assert.deepEqual(c.json.mail.result, cards);
+      const col = c.json.player.save.collection as Record<string, number>;
+      assert.equal(Object.values(col).reduce((a, b) => a + b, 0), cards.length);
+      for (const id of cards) assert.ok(col[id] >= 1);
     });
 
-    // CAMBIA en paso 6 (el body deja de importar)
-    it("sin `cards` (o no-lista) da 400 'Sobre desconocido.' y el envío sigue sin abrir", async () => {
-      const p = await sendBooster();
-      for (const body of [{}, { cards: "x" }, { cards: null }]) {
+    it("respeta los slots: las Energías básicas del slot 'Energy' y nada de Energías básicas en los demás", async () => {
+      const slots: any[] = BOOSTER.slots?.length ? BOOSTER.slots : [];
+      if (!slots.length) return; // sobre con slots por defecto: lo cubre packs.test.ts
+      const energySlots = slots.filter((s) => s.rarity === "Energy").reduce((n, s) => n + s.count, 0);
+      const { c } = await claimOnce();
+      const byId = new Map<string, any>(catalog.cards.map((x: any) => [x.id, x]));
+      const energies = (c.json.cards as string[]).filter((id) => byId.get(id)?.kind === "energy" && !byId.get(id)?.special);
+      assert.ok(energies.length >= energySlots, `energías ${energies.length} < ${energySlots}`);
+    });
+
+    it("el cuerpo del cliente se ignora: `cards` inventadas, de más o fuera del pool no cambian el resultado", async () => {
+      for (const body of [{}, { cards: ["carta-que-no-esta-en-el-sobre"] }, { cards: Array(40).fill(BOOSTER.cards[0]) }, { cards: "x" }, { cards: null }]) {
+        const p = await sendBooster();
         const c = await claim(p, body);
-        assert.equal(c.status, 400, JSON.stringify(body));
-        assert.deepEqual(c.json, { error: "Sobre desconocido." });
+        assert.equal(c.status, 200, JSON.stringify(body));
+        assert.equal(c.json.cards.length, size());
+        assert.equal(c.json.cards.includes("carta-que-no-esta-en-el-sobre"), false);
+        const pool = new Set<string>(BOOSTER.cards);
+        assert.ok(c.json.cards.every((id: string) => pool.has(id)));
       }
-      assert.equal((await me(p.token, "GET", "/api/me/mail")).json.mail.length, 1);
     });
 
-    // CAMBIA en paso 6 (el body deja de importar)
-    it("con una carta fuera del pool o de más da 400 'Las cartas no corresponden a ese sobre.'", async () => {
-      const p = await sendBooster();
-      const fuera = await claim(p, { cards: ["carta-que-no-esta-en-el-sobre"] });
-      assert.equal(fuera.status, 400);
-      assert.deepEqual(fuera.json, { error: "Las cartas no corresponden a ese sobre." });
-      const demas = await claim(p, { cards: Array(size() + 1).fill(BOOSTER.cards[0]) });
-      assert.equal(demas.status, 400);
-      assert.deepEqual(demas.json, { error: "Las cartas no corresponden a ese sobre." });
-      assert.equal((await me(p.token, "GET", "/api/me/mail")).json.mail.length, 1);
+    it("el sorteo es del servidor y varía: varios sobres no dan siempre lo mismo", async () => {
+      const seen = new Set<string>();
+      for (let i = 0; i < 6; i++) seen.add(JSON.stringify((await claimOnce()).c.json.cards));
+      assert.ok(seen.size > 1, "6 sobres idénticos: el RNG no está sorteando");
+    });
+
+    it("un sobre ya abierto da 409 y no suma otra vez", async () => {
+      const { p, c } = await claimOnce();
+      assert.equal((await claim(p, {})).status, 409);
+      const g = await me(p.token, "GET", "/api/me");
+      const total = Object.values(g.json.save.collection as Record<string, number>).reduce((a, b) => a + b, 0);
+      assert.equal(total, c.json.cards.length);
+      assert.equal(g.json.rev, c.json.player.rev);
     });
   });
 });
@@ -712,7 +904,8 @@ describe("admin: validación del mundo", () => {
 // ================================================================== admin: jugadores
 describe("admin: jugadores", () => {
   it("GET /players lista a todos con totales y sin el save", async () => {
-    const { id } = await newPlayer({ collection: { [CARD]: 3, otra: 2 } });
+    const other = catalog.cards.find((x: any) => x.id !== CARD).id;
+    const { id } = await newPlayer({ grant: [CARD, CARD, CARD, other, other] });
     const r = await adm("GET", "/admin/v1/players");
     assert.equal(r.status, 200);
     const p = r.json.players.find((x: any) => x.id === id);
@@ -720,13 +913,13 @@ describe("admin: jugadores", () => {
     assert.equal(p.cards, 5);
     assert.equal(p.distinct, 2);
     assert.equal(p.pending, 0);
-    assert.equal(p.rev, 1);
+    assert.equal(p.rev, 2);
     assert.equal("save" in p, false);
     assert.equal(JSON.stringify(r.json).includes("token"), false);
   });
 
   it("GET /players/<id> trae save y buzón (incluye lo ya cobrado); 404 si no existe", async () => {
-    const { id, token } = await newPlayer({ collection: { [CARD]: 1 } });
+    const { id, token } = await newPlayer({ grant: [CARD] });
     await adm("POST", "/admin/v1/mail", { body: { to: [id], kind: "cards", cards: [CARD] } });
     await adm("POST", "/admin/v1/mail", { body: { to: [id], kind: "cards", cards: [CARD] } });
     const mid = (await me(token, "GET", "/api/me/mail")).json.mail[0].id;
@@ -736,8 +929,8 @@ describe("admin: jugadores", () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.id, id);
     assert.deepEqual(r.json.save.collection, { [CARD]: 2 });
-    assert.equal(r.json.mail.length, 2);
-    assert.equal(r.json.mail.filter((m: any) => m.claimed !== null).length, 1);
+    assert.equal(r.json.mail.length, 3); // el regalo inicial + 2
+    assert.equal(r.json.mail.filter((m: any) => m.claimed !== null).length, 2);
     assert.equal(JSON.stringify(r.json).includes("token_hash"), false);
     const list = (await adm("GET", "/admin/v1/players")).json.players.find((x: any) => x.id === id);
     assert.equal(list.pending, 1);

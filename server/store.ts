@@ -40,6 +40,28 @@ CREATE TABLE IF NOT EXISTS mail (
   result      TEXT
 );
 CREATE INDEX IF NOT EXISTS mail_by_player ON mail(player_id, claimed);
+CREATE TABLE IF NOT EXISTS invites (
+  code_hash   TEXT PRIMARY KEY,
+  label       TEXT NOT NULL DEFAULT '',
+  uses_left   INTEGER NOT NULL,
+  expires     REAL,
+  created     REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS matches (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL CHECK (kind IN ('pvp', 'npc')),
+  p0          TEXT NOT NULL,
+  p1          TEXT NOT NULL,
+  seed        TEXT NOT NULL,
+  catalog_rev TEXT,
+  decks       TEXT NOT NULL,
+  intents     TEXT NOT NULL DEFAULT '[]',
+  started     REAL NOT NULL,
+  ended       REAL,
+  winner      INTEGER,
+  reason      TEXT,
+  reward      TEXT
+);
 CREATE TABLE IF NOT EXISTS admin_tokens (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash  TEXT NOT NULL UNIQUE,
@@ -53,6 +75,18 @@ CREATE TABLE IF NOT EXISTS admin_tokens (
 export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
+
+/** Código de invitación en forma canónica (mayúsculas, sin guiones ni espacios). */
+export function normalizeInvite(code: unknown): string {
+  return typeof code === "string" ? code.toUpperCase().replace(/[\s-]/g, "") : "";
+}
+const INVITE_RE = /^[A-HJ-NP-Z2-9]{8}$/;
+export const inviteHash = (code: unknown): string => hashToken(normalizeInvite(code));
+
+/** La invitación no existe, venció, se agotó o fue revocada. */
+export class InviteError extends Error {}
+/** Se llegó a MAX_PLAYERS. */
+export class PlayersFull extends Error {}
 
 const now = (): number => Date.now() / 1000;
 
@@ -142,11 +176,23 @@ export class Store {
     return p;
   }
 
-  createPlayer(save?: unknown, name?: string): [Record<string, any>, string] {
+  /**
+   * Alta con invitación (ADR 0002 3.3). Ignora todo lo que mande el cliente salvo el nombre: la colección arranca
+   * vacía de `pulled` (la colección inicial la suma ownedCounts del núcleo). Todo en una transacción: si el
+   * servidor está lleno la invitación NO se consume.
+   */
+  createPlayer(name: string | undefined, inviteCode: unknown, maxPlayers: number): [Record<string, any>, string] {
     const token = randomBytes(24).toString("base64url");
     const t = now();
+    const clean = (name ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
     return this.tx(() => {
+      const inv = INVITE_RE.test(normalizeInvite(inviteCode))
+        ? this.get("SELECT * FROM invites WHERE code_hash=?", inviteHash(inviteCode))
+        : undefined;
+      if (!inv || inv.uses_left <= 0 || (inv.expires !== null && inv.expires <= t)) throw new InviteError("Código de invitación inválido o usado.");
       const n = Number(this.get("SELECT COUNT(*) AS n FROM players")!.n);
+      if (n >= maxPlayers) throw new PlayersFull("El servidor está lleno.");
+      this.run("UPDATE invites SET uses_left=uses_left-1 WHERE code_hash=?", inv.code_hash);
       let pid: string;
       for (;;) {
         pid = "J-";
@@ -155,10 +201,36 @@ export class Store {
       }
       this.run(
         "INSERT INTO players (id, token_hash, name, created, last_seen, save) VALUES (?,?,?,?,?,?)",
-        pid, hashToken(token), cut(name || `Jugador ${n + 1}`, 24), t, t, JSON.stringify(cleanSave(save)),
+        pid, hashToken(token), cut(clean || `Jugador ${n + 1}`, 24), t, t, JSON.stringify({ collection: {} }),
       );
       const row = this.get("SELECT * FROM players WHERE id=?", pid)!;
       return [this.player(row), token] as [Record<string, any>, string];
+    });
+  }
+
+  // ------------------------------------------------------------ invitaciones (solo CLI)
+  /** Crea una invitación. Devuelve el código en claro (XXXX-XXXX); en la base queda solo su hash. */
+  createInvite(label: string, uses: number, days: number): string {
+    let a = "";
+    for (let i = 0; i < 8; i++) a += ID_ALPHABET[randomInt(ID_ALPHABET.length)];
+    const t = now();
+    this.tx(() => this.run(
+      "INSERT INTO invites (code_hash, label, uses_left, expires, created) VALUES (?,?,?,?,?)",
+      inviteHash(a), cut(label, 40), uses, t + days * 86400, t,
+    ));
+    return `${a.slice(0, 4)}-${a.slice(4)}`;
+  }
+
+  listInvites(): Row[] {
+    return this.all("SELECT substr(code_hash,1,8) AS id, label, uses_left, expires, created FROM invites ORDER BY created").map((r) => ({ ...r }));
+  }
+
+  /** Revoca por código completo o por el id (8 hex) que muestra `invite list`. */
+  revokeInvite(codeOrId: string): boolean {
+    return this.tx(() => {
+      let n = this.run("DELETE FROM invites WHERE code_hash=?", inviteHash(codeOrId)).changes;
+      if (n === 0 && /^[0-9a-f]{8}$/.test(codeOrId)) n = this.run("DELETE FROM invites WHERE substr(code_hash,1,8)=?", codeOrId).changes;
+      return n > 0;
     });
   }
 
@@ -216,6 +288,23 @@ export class Store {
       if (!row) throw new Error(`jugador inexistente: ${pid}`);
       if (row.rev !== rev) throw new Conflict(this.player(row));
       this.run("UPDATE players SET save=?, rev=rev+1, last_seen=? WHERE id=?", JSON.stringify(cleanSave(save)), now(), pid);
+      row = this.get("SELECT * FROM players WHERE id=?", pid)!;
+      return this.player(row);
+    });
+  }
+
+  /**
+   * Guarda los mazos si `rev` coincide. `build` recibe el save vigente (para validar contra la colección real, dentro de la
+   * misma transacción) y devuelve los mazos ya normalizados; si lanza ValueError no se guarda nada.
+   */
+  saveDecks(pid: string, rev: number, build: (save: Record<string, any>) => unknown): Record<string, any> {
+    return this.tx(() => {
+      let row = this.get("SELECT * FROM players WHERE id=?", pid);
+      if (!row) throw new Error(`jugador inexistente: ${pid}`);
+      if (row.rev !== rev) throw new Conflict(this.player(row));
+      const save = JSON.parse(row.save || "{}");
+      save.decks = build(save);
+      this.run("UPDATE players SET save=?, rev=rev+1, last_seen=? WHERE id=?", JSON.stringify(save), now(), pid);
       row = this.get("SELECT * FROM players WHERE id=?", pid)!;
       return this.player(row);
     });
