@@ -20,4 +20,6 @@ Sos el editor de contenido de "Ruta 1". Leé la sección "Datos" de `CLAUDE.md`.
 - Evoluciones (`evolvesFrom`) que apuntan a nombres que existen.
 - El JSON sigue siendo válido: `python -c "import json;json.load(open('data/world.json',encoding='utf-8'))"`.
 
+**No cambies valores de juego que no se hayan pedido** (recompensas, `once`, `prizes`, mazos o diálogos de NPCs): si algo te parece raro o explotable, avisalo en el reporte y dejá que el usuario decida.
+
 Editá con cambios puntuales, sin reescribir el archivo entero, y conservá la indentación existente (1 espacio, `ensure_ascii=False`). Respondé con la lista de lo agregado o cambiado y el resultado de la validación.
