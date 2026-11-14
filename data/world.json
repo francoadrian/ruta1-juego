@@ -255,7 +255,7 @@
    },
    "reward": {
     "booster": "random",
-    "once": false
+    "once": true
    },
    "dialog": {
     "intro": [
