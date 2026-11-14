@@ -81,6 +81,7 @@ type SlotView = { [K in keyof Slot as Exclude<K, "stack" | "energy" | "tools" | 
 
 interface PlayerView {
   name: string;
+  /** Solo el nombre del mazo PROPIO; el del rival no se manda (""), es información de su estrategia. */
   deckName: string;
   /** Propia: las cartas. Del rival: solo la cantidad. */
   hand: CardView[] | number;
@@ -575,7 +576,7 @@ function viewFor(m: Match, pi: 0 | 1): BattleView {
     const mine = q === pi;
     return {
       name: p.name,
-      deckName: p.deckName,
+      deckName: mine ? p.deckName : "",
       hand: mine ? p.hand.map(mCardView) : p.hand.length,
       deck: p.deck.length,
       prizes: p.prizes.length,

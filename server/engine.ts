@@ -23,7 +23,7 @@ const CORE_FILES = ["baseset", "cards", "rng", "tcg", "ai", "packs", "match"].ma
 const EXPORTS = [
   "CARDS", "BOOSTERS", "DEFAULT_SLOTS", "BRUSHFIRE", "OVERGROWTH", "BENCH_MAX", "DECK_SIZE", "DECK_NAME_MAX",
   "isPlayable", "isBasicEnergy", "isBasic", "ownedCounts", "deckProblems", "shuffle", "newBattle", "generateBooster",
-  "createMatch", "applyIntent", "viewFor", "defaultIntent", "stepAI", "peek", "logSince",
+  "createMatch", "applyIntent", "mParse", "viewFor", "defaultIntent", "stepAI", "peek", "logSince",
 ].join(", ");
 
 export interface Rng {

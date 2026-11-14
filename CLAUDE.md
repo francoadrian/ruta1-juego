@@ -24,9 +24,11 @@ Configuraciones en `.claude/launch.json`:
 | `npm test` | Motor y núcleo sin red: `engine`, `view`, `packs`, `driver` (`tests/*.test.ts`) |
 | `npm run test:api` | `tests/api.contract.test.ts` contra un servidor Node temporal (DB, datos y puertos propios; crea invitaciones y tokens por CLI) |
 | `npm run test:server` | `tests/server.config.test.ts`: Host/Origin, límites, `MAX_PLAYERS`, `GAME_HOST`, CLI de invitaciones |
-| `npm run test:ws` | `tests/ws.test.ts`: WebSocket (lobby, desafíos, cola, partidas PvP/NPC, tiempos, límites, reinicio) |
+| `npm run test:ws` | `tests/ws.test.ts`: WebSocket (lobby, desafíos, cola, partidas PvP/NPC, tiempos, límites, reinicio) y endurecimiento (error de DB en auth, log de partidas, tope de partidas, borrado por admin) |
+| `npm run test:hardening` | `tests/hardening.test.ts`: Host/Origin, límites con tope, presupuesto de fallos, nombres, HMAC de invitaciones, log incremental y poda (sin servidor) |
+| `npm run typecheck` | `tsc` sobre `src/` (`tsconfig.json`) y sobre `server/` (`tsconfig.server.json`, con `@types/node`) |
 
-Todos usan datos temporales: nunca la DB real. No hay linter; `tsconfig.json` sirve solo para chequear tipos (`noEmit`).
+Todos usan datos temporales: nunca la DB real. No hay linter; `tsconfig.json` y `tsconfig.server.json` sirven solo para chequear tipos (`noEmit`).
 
 ## Arquitectura
 

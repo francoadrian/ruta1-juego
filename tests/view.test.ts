@@ -144,7 +144,7 @@ describe("viewFor: forma", () => {
       if (++n % 7) return;
       const a = c.viewFor(m, 0);
       const b = c.viewFor(m, 1);
-      for (const k of ["active", "bench", "discard", "name", "deckName", "deck", "prizes", "turns", "mulligans"]) {
+      for (const k of ["active", "bench", "discard", "name", "deck", "prizes", "turns", "mulligans"]) { // deckName no: es solo del propio jugador
         assert.equal(JSON.stringify(a.p[1][k]), JSON.stringify(b.p[0][k]), `p[1].${k} del 0 = p[0].${k} del 1`);
         assert.equal(JSON.stringify(a.p[0][k]), JSON.stringify(b.p[1][k]));
       }

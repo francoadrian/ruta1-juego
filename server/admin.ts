@@ -39,7 +39,15 @@ class HttpError extends Error {
   }
 }
 
-export function makeAdminServer(store: Store, content: Content): http.Server {
+/** Avisos hacia el WebSocket (server/ws.ts) cuando el admin cambia a un jugador conectado. */
+export interface AdminHooks {
+  /** El jugador se borró: hay que cerrar su socket (4401) y anular su partida. */
+  playerDeleted?: (pid: string) => void;
+  /** El jugador cambió de nombre: se refresca en el lobby (no se lo desconecta). */
+  playerRenamed?: (pid: string, name: string) => void;
+}
+
+export function makeAdminServer(store: Store, content: Content, hooks: AdminHooks = {}): http.Server {
   function sendJson(res: ServerResponse, status: number, obj: unknown): void {
     const body = Buffer.from(JSON.stringify(obj), "utf8");
     res.writeHead(status, {
@@ -139,11 +147,13 @@ export function makeAdminServer(store: Store, content: Content): http.Server {
         throw e;
       }
       if (!p) throw new HttpError(404, "No existe ese jugador.");
+      try { hooks.playerRenamed?.(pid, p.name); } catch (e) { process.stderr.write(`[admin] hook playerRenamed: ${(e as Error)?.message}\n`); }
       delete p.save;
       return sendJson(res, 200, p);
     }
     if (method === "DELETE") {
       if (!store.deletePlayer(pid)) throw new HttpError(404, "No existe ese jugador.");
+      try { hooks.playerDeleted?.(pid); } catch (e) { process.stderr.write(`[admin] hook playerDeleted: ${(e as Error)?.message}\n`); }
       return sendJson(res, 200, { ok: true });
     }
     throw new HttpError(405, "Método no permitido.");

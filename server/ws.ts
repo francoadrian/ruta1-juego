@@ -11,6 +11,8 @@
 //   WS_AUTH_MS=5000        tiempo para mandar `auth` tras abrir la conexión
 //   WS_MSGS_PER_SEC=20     mensajes por segundo por conexión (más = cierre 4429)
 //   WS_CONN_PER_MIN=60     conexiones nuevas por IP y minuto
+//   MATCH_LOG_MAX_ENTRIES=2000   tope de entradas del log de intents por partida (y 256 KB)
+//   MATCH_STARTS_PER_MIN=6 / MATCH_STARTS_PER_HOUR=60   partidas que puede empezar un jugador (más = error; si insiste, cierre 4429)
 
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, Server } from "node:http";
@@ -26,6 +28,8 @@ const MAX_BYTES = 16 * 1024;
 const ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const MAX_TIMEOUTS = 3;
 const MAX_SOCKETS = 200;
+const MAX_LOG_BYTES = 256 * 1024;
+const MAX_STRIKES = 5; // intentos de pasarse del límite de partidas antes del cierre 4429
 
 export interface WsConfig {
   turnMs: number;
@@ -36,6 +40,10 @@ export interface WsConfig {
   authMs: number;
   msgsPerSec: number;
   connPerMin: number;
+  startsPerMin: number;
+  startsPerHour: number;
+  /** Entradas del log de intents por partida (para depurar; el resto se descarta). */
+  logMax: number;
 }
 
 export function wsConfigFromEnv(env: NodeJS.ProcessEnv): WsConfig {
@@ -52,6 +60,9 @@ export function wsConfigFromEnv(env: NodeJS.ProcessEnv): WsConfig {
     authMs: int("WS_AUTH_MS", 5000),
     msgsPerSec: int("WS_MSGS_PER_SEC", 20),
     connPerMin: int("WS_CONN_PER_MIN", 60),
+    startsPerMin: int("MATCH_STARTS_PER_MIN", 6),
+    startsPerHour: int("MATCH_STARTS_PER_HOUR", 60),
+    logMax: int("MATCH_LOG_MAX_ENTRIES", 2000),
   };
 }
 
@@ -74,6 +85,7 @@ interface Conn {
   lastRx: number;
   authTimer: NodeJS.Timeout | null;
   replaced: boolean;
+  strikes: number;
 }
 
 interface Seat {
@@ -95,6 +107,8 @@ interface Active {
   seats: [Seat, Seat];
   seed: string;
   log: unknown[];
+  logBytes: number;
+  logTruncated: boolean;
   flushed: number;
   npc: { id: string; def: any } | null;
   timer: NodeJS.Timeout | null;
@@ -131,6 +145,10 @@ const randId = (prefix: string, n: number): string => {
 // ------------------------------------------------------------------ servidor
 export interface WsHandle {
   close(): void;
+  /** El admin borró al jugador: se cierra su socket (4401) y se anula su partida. */
+  dropPlayer(pid: string): void;
+  /** El admin renombró al jugador: se refresca su nombre en el lobby (no se lo desconecta). */
+  renamePlayer(pid: string, name: string): void;
   /** Para los tests y la depuración. */
   stats(): { sockets: number; peers: number; matches: number; challenges: number; queue: number };
 }
@@ -150,9 +168,62 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
   let lobbyTimer: NodeJS.Timeout | null = null;
   const actives = new Set<Active>();
 
-  const warn = (what: string, e: unknown): void => {
-    process.stderr.write(`[ws] ${what}: ${(e as Error)?.stack ?? e}\n`);
+  // Logs a stderr, una línea por evento, SIN tokens ni códigos de invitación (solo ids de jugador/partida e IP).
+  const stamp = (): string => new Date().toISOString();
+  const log = (msg: string): void => {
+    process.stderr.write(`${stamp()} [ws] ${msg}\n`);
   };
+  const warn = (what: string, e: unknown): void => {
+    process.stderr.write(`${stamp()} [ws] ${what}: ${(e as Error)?.stack ?? e}\n`);
+  };
+  const lastLog = new Map<string, number>();
+  /** Como log, pero a lo sumo una vez por segundo por clave (un flood de rechazos no inunda el archivo de logs). */
+  const logThrottled = (key: string, msg: string): void => {
+    const t = Date.now();
+    if (t - (lastLog.get(key) ?? 0) < 1000) return;
+    lastLog.set(key, t);
+    if (lastLog.size > 500) for (const [k, v] of lastLog) if (t - v > 60_000) lastLog.delete(k);
+    log(msg);
+  };
+  /** Corre `fn` (un timer o un manejador): una excepción se loguea y, si es de una partida, la anula; nunca sube al proceso. */
+  function guard(what: string, fn: () => void, am?: Active): void {
+    try {
+      fn();
+    } catch (e) {
+      if (am) voidMatch(am, e); else warn(what, e);
+    }
+  }
+  // Partidas empezadas por jugador (ventana de 1 h) para limitar el spam de partidas.
+  const starts = new Map<string, number[]>();
+  const startsLeft = (pid: string): boolean => {
+    const t = Date.now();
+    const arr = (starts.get(pid) ?? []).filter((x) => x > t - 3_600_000);
+    starts.set(pid, arr);
+    return arr.length < cfg.startsPerHour && arr.filter((x) => x > t - 60_000).length < cfg.startsPerMin;
+  };
+  const recordStart = (pid: string): void => { (starts.get(pid) ?? starts.set(pid, []).get(pid)!).push(Date.now()); };
+  /** true (y avisa) si el jugador ya empezó demasiadas partidas; si insiste, se lo desconecta con 4429. */
+  function overStartBudget(conn: Conn, me: Peer, ref: string): boolean {
+    if (startsLeft(me.id)) return false;
+    err(conn, ref, "Empezaste demasiadas partidas seguidas. Esperá un rato.");
+    if (++conn.strikes >= MAX_STRIKES) {
+      log(`cierre 4429 (demasiadas partidas) jugador=${me.id} ip=${conn.ip}`);
+      kill(conn, 4429, "Demasiadas partidas.");
+    }
+    return true;
+  }
+  /** Agrega una entrada al log de la partida con tope de cantidad y de bytes. */
+  function pushLog(am: Active, entry: unknown): void {
+    if (am.logTruncated) return;
+    const size = JSON.stringify(entry).length;
+    if (am.log.length >= cfg.logMax || am.logBytes + size > MAX_LOG_BYTES) {
+      am.logTruncated = true;
+      am.log.push({ k: "truncated" });
+      return;
+    }
+    am.logBytes += size;
+    am.log.push(entry);
+  }
 
   // --------------------------------------------------------------- envío y cierre
   function send(conn: Conn | null, obj: unknown): void {
@@ -187,7 +258,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (lobbyTimer) return;
     lobbyTimer = setTimeout(() => {
       lobbyTimer = null;
-      for (const c of conns) if (c.sub && c.pid) send(c, lobbyFor(c.pid));
+      guard("lobby", () => { for (const c of conns) if (c.sub && c.pid) send(c, lobbyFor(c.pid)); });
     }, 100);
     lobbyTimer.unref();
   }
@@ -257,13 +328,14 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (to.match) return err(conn, "challenge.send", "Ese jugador está jugando.");
     if ([...challenges.values()].some((c) => c.from === me.id)) return err(conn, "challenge.send", "Ya tenés un desafío pendiente.");
     if ([...challenges.values()].filter((c) => c.to === to.id).length >= 5) return err(conn, "challenge.send", "Ese jugador tiene demasiados desafíos pendientes.");
+    if (overStartBudget(conn, me, "challenge.send")) return;
     const deckId = typeof msg.deckId === "string" ? msg.deckId : undefined;
     const d = deckOf(engine.core(), me.id, deckId);
     if ("error" in d) return err(conn, "challenge.send", d.error);
     const id = `C-${++chalSeq}`;
     const c: Challenge = {
       id, from: me.id, to: to.id, prizes, deckId, expires: Date.now() + cfg.challengeMs,
-      timer: setTimeout(() => { if (challenges.get(id)) closeChallenge(c, "expired"); }, cfg.challengeMs),
+      timer: setTimeout(() => guard("desafío", () => { if (challenges.get(id)) closeChallenge(c, "expired"); }), cfg.challengeMs),
     };
     challenges.set(id, c);
     send(to.conn, { type: "challenge.incoming", id, from: { id: me.id, name: me.name }, prizes, expires: sec(c.expires) });
@@ -288,6 +360,8 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     const from = peers.get(c.from);
     if (!from || !from.conn) return closeChallenge(c, "cancelled", "El rival se desconectó.");
     if (me.match || from.match) return closeChallenge(c, "cancelled", "Alguno de los dos ya está jugando.");
+    if (overStartBudget(conn, me, type)) return; // el desafío sigue: puede aceptar más tarde
+    if (!startsLeft(from.id)) return closeChallenge(c, "cancelled", "El rival empezó demasiadas partidas seguidas.");
     const core = engine.core();
     const dMe = deckOf(core, me.id, typeof msg.deckId === "string" ? msg.deckId : undefined);
     if ("error" in dMe) return err(conn, type, dMe.error); // el desafío sigue: puede aceptar con otro mazo
@@ -306,6 +380,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
   // --------------------------------------------------------------- cola
   function onQueueJoin(conn: Conn, me: Peer, msg: any): void {
     if (me.match) return err(conn, "queue.join", "Ya estás en una partida.");
+    if (overStartBudget(conn, me, "queue.join")) return;
     const deckId = typeof msg.deckId === "string" ? msg.deckId : undefined;
     const d = deckOf(engine.core(), me.id, deckId);
     if ("error" in d) return err(conn, "queue.join", d.error);
@@ -323,6 +398,8 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
       const bad = (p: Peer | undefined): boolean => !p || !p.conn || !!p.match || !p.queued;
       if (bad(a)) { queue.shift(); if (a) a.queued = null; continue; }
       if (bad(b)) { queue.splice(1, 1); if (b) b.queued = null; continue; }
+      if (!startsLeft(a!.id)) { queue.shift(); a!.queued = null; queueState(a!.conn, false); err(a!.conn!, "queue.join", "Empezaste demasiadas partidas seguidas. Esperá un rato."); continue; }
+      if (!startsLeft(b!.id)) { queue.splice(1, 1); b!.queued = null; queueState(b!.conn, false); err(b!.conn!, "queue.join", "Empezaste demasiadas partidas seguidas. Esperá un rato."); continue; }
       const core = engine.core();
       const da = deckOf(core, a!.id, a!.queued!.deckId);
       const db = deckOf(core, b!.id, b!.queued!.deckId);
@@ -347,9 +424,10 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     const world = content.world.objectOrNull();
     const def = typeof msg.npc === "string" && world && Array.isArray(world.npcs) ? world.npcs.find((n: any) => n && n.id === msg.npc) : undefined;
     if (!def || def.battle === false) return err(conn, "npc.start", "Ese NPC no juega partidas.");
+    if (overStartBudget(conn, me, "npc.start")) return;
+    // contra un NPC los premios los fija el servidor (6, o def.prizes si es > 0): el `prizes` del cliente se ignora
     const fixed = Number(def.prizes) || 0;
-    const prizes = fixed > 0 ? Math.min(6, Math.floor(fixed)) : parsePrizes(msg.prizes);
-    if (prizes === null) return err(conn, "npc.start", "Cantidad de premios inválida.");
+    const prizes = fixed > 0 ? Math.max(1, Math.min(6, Math.floor(fixed))) : 6;
     const core = engine.core();
     const mine = deckOf(core, me.id, typeof msg.deckId === "string" ? msg.deckId : undefined);
     if ("error" in mine) return err(conn, "npc.start", mine.error);
@@ -385,7 +463,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     });
     const am: Active = {
       id: "", kind, core, m, seats: [mkSeat(players[0], names[0]), mkSeat(players[1], names[1])], seed: rng.seed,
-      log: [], flushed: 0, npc, timer: null, npcTimer: null, reason: null, ended: false,
+      log: [], logBytes: 0, logTruncated: false, flushed: 0, npc, timer: null, npcTimer: null, reason: null, ended: false,
     };
     const raw = content.catalog.raw();
     const catalogRev = raw ? createHash("sha1").update(raw).digest("hex").slice(0, 12) : null;
@@ -403,6 +481,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     }
     if (!ok) return false;
     actives.add(am);
+    for (const p of players) if (p) recordStart(p.id);
     for (const p of players) if (p) { p.match = am; leaveQueue(p.id); cancelChallengesOf(p.id, "Empezó una partida."); }
     refreshDeadlines(am, -1);
     for (let i = 0; i < 2; i++) {
@@ -450,12 +529,12 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (am.ended) return;
     const ds = am.seats.map((s) => s.deadline).filter((d): d is number => d !== null);
     if (!ds.length) return;
-    am.timer = setTimeout(() => onTimer(am), Math.max(0, Math.min(...ds) - Date.now()) + 5);
+    am.timer = setTimeout(() => guard("timer", () => onTimer(am), am), Math.max(0, Math.min(...ds) - Date.now()) + 5);
   }
 
   function scheduleNpc(am: Active): void {
     if (am.kind !== "npc" || am.ended || am.npcTimer) return;
-    am.npcTimer = setTimeout(() => {
+    am.npcTimer = setTimeout(() => guard("npc", () => {
       am.npcTimer = null;
       if (am.ended) return;
       const before = am.m.b.logCount;
@@ -466,10 +545,10 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
         return voidMatch(am, e);
       }
       if (acted) {
-        am.log.push({ pi: 1, k: "ai" });
+        pushLog(am, { pi: 1, k: "ai" });
         afterChange(am, before, -1, -1);
       }
-    }, cfg.npcStepMs);
+    }, am), cfg.npcStepMs);
   }
 
   function onTimer(am: Active): void {
@@ -486,7 +565,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
   function onTimeout(am: Active, i: 0 | 1): void {
     const s = am.seats[i];
     s.timeouts++;
-    am.log.push({ pi: i, k: "timeout", n: s.timeouts });
+    pushLog(am, { pi: i, k: "timeout", n: s.timeouts });
     if (s.timeouts >= MAX_TIMEOUTS) return forceEnd(am, i, "timeout");
     const before = am.m.b.logCount;
     let failed = false;
@@ -549,7 +628,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
 
   function flushIntents(am: Active): void {
     try {
-      store.matchIntents(am.id, am.log);
+      store.matchIntents(am.id, am.log.slice(am.flushed)); // solo las entradas nuevas (no se reescribe todo el log)
       am.flushed = am.log.length;
     } catch (e) {
       warn("matchIntents", e);
@@ -613,7 +692,8 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
       }
     }
     try {
-      store.matchEnd(am.id, w === 0 || w === 1 || w === 2 ? w : null, reason, reward, am.log);
+      store.matchEnd(am.id, w === 0 || w === 1 || w === 2 ? w : null, reason, reward, am.log.slice(am.flushed));
+      am.flushed = am.log.length;
     } catch (e) {
       warn("matchEnd", e);
     }
@@ -630,8 +710,16 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
   function voidMatch(am: Active, e: unknown): void {
     if (am.ended) return;
     warn(`motor, partida ${am.id} anulada`, e);
+    abortMatch(am);
+  }
+
+  /** Anula la partida sin resultado (void): DB, aviso a los dos y liberación. */
+  function abortMatch(am: Active): void {
+    if (am.ended) return;
+    log(`partida ${am.id} anulada (${am.kind}) jugadores=${am.seats.map((s) => s.pid ?? "npc").join(",")}`);
     try {
-      store.matchEnd(am.id, null, "void", null, am.log);
+      store.matchEnd(am.id, null, "void", null, am.log.slice(am.flushed));
+      am.flushed = am.log.length;
     } catch (e2) {
       warn("matchEnd", e2);
     }
@@ -648,7 +736,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (!am || am.id !== msg.match) return fail("No estás en esa partida.");
     if (!Number.isSafeInteger(n) || n < 0) return fail("Número de intención inválido.");
     const i = seatOf(am, me.id);
-    if (i < 0) return fail("No estás en esa partida.");
+    if (i === -1) return fail("No estás en esa partida.");
     const seat = am.seats[i];
     if (n <= seat.lastN) { // repetida (por ejemplo tras reconectar): no se vuelve a aplicar; se reenvía el estado
       send(conn, stateMsg(am, i, { ack: n, log: [] }));
@@ -664,7 +752,9 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     }
     if (e !== null) return fail(e);
     const it = isObj(msg.intent) ? msg.intent : {};
-    am.log.push({ pi: i, n, it: JSON.parse(JSON.stringify(msg.intent ?? null)) });
+    // se guarda la copia limpia que arma el parser del motor (solo campos conocidos), no el JSON crudo del cliente
+    const clean = am.core.mParse(msg.intent);
+    pushLog(am, { pi: i, n, it: typeof clean === "string" ? null : JSON.parse(JSON.stringify(clean)) });
     seat.timeouts = 0;
     if (it.t === "surrender") am.reason = "surrender";
     afterChange(am, before, i, n);
@@ -689,10 +779,10 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     if (!s.online || am.ended) return;
     s.online = false;
     s.graceUntil = Date.now() + cfg.graceMs;
-    s.graceTimer = setTimeout(() => {
+    s.graceTimer = setTimeout(() => guard("gracia", () => {
       s.graceTimer = null;
       if (!am.ended && !s.online) forceEnd(am, i as 0 | 1, "abandon");
-    }, cfg.graceMs);
+    }, am), cfg.graceMs);
     sendPid(am.seats[1 - i].pid, { type: "match.opp", status: "disconnected", graceUntil: sec(s.graceUntil) });
   }
   function onSeatBack(am: Active, i: number): void {
@@ -706,10 +796,16 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
 
   // --------------------------------------------------------------- conexión
   function onAuth(conn: Conn, msg: any): void {
-    if (typeof msg.token !== "string" || msg.token.length > 200) return kill(conn, 4401, "Token inválido.");
+    if (typeof msg.token !== "string" || msg.token.length > 200) {
+      logThrottled("auth", `auth fallida (token malformado) ip=${conn.ip}`);
+      return kill(conn, 4401, "Token inválido.");
+    }
     if (msg.v !== 1) return kill(conn, 4400, "Versión no soportada.");
     const p = store.playerByToken(msg.token);
-    if (!p) return kill(conn, 4401, "Token inválido.");
+    if (!p) {
+      logThrottled("auth", `auth fallida (token desconocido) ip=${conn.ip}`);
+      return kill(conn, 4401, "Token inválido.");
+    }
     if (conn.authTimer) clearTimeout(conn.authTimer);
     conn.authTimer = null;
     let peer = peers.get(p.id);
@@ -758,17 +854,33 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     scheduleLobby();
   }
 
+  /** Todo lo que llega por un socket pasa por acá: una excepción (p. ej. la base bloqueada) cierra ESA conexión con 1011, nunca tumba el servidor. */
   function onMessage(conn: Conn, data: unknown, isBinary: boolean): void {
+    try {
+      handleMessage(conn, data, isBinary);
+    } catch (e) {
+      warn(`mensaje (ip=${conn.ip}, jugador=${conn.pid ?? "-"})`, e);
+      kill(conn, 1011, "Error interno.");
+    }
+  }
+
+  function handleMessage(conn: Conn, data: unknown, isBinary: boolean): void {
     if (conn.ws.readyState !== WebSocket.OPEN) return;
     const now = Date.now();
     conn.lastRx = now;
     conn.stamps.push(now);
     if (conn.stamps.length > cfg.msgsPerSec) {
-      if (now - conn.stamps[0] < 1000) return kill(conn, 4429, "Demasiados mensajes.");
+      if (now - conn.stamps[0] < 1000) {
+        logThrottled("rate", `cierre 4429 (demasiados mensajes) ip=${conn.ip} jugador=${conn.pid ?? "-"}`);
+        return kill(conn, 4429, "Demasiados mensajes.");
+      }
       conn.stamps.shift();
     }
     const buf = Array.isArray(data) ? Buffer.concat(data as Buffer[]) : Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-    if (buf.length > MAX_BYTES) return kill(conn, 4429, "Mensaje demasiado grande.");
+    if (buf.length > MAX_BYTES) {
+      logThrottled("big", `cierre 4429 (mensaje demasiado grande) ip=${conn.ip} jugador=${conn.pid ?? "-"}`);
+      return kill(conn, 4429, "Mensaje demasiado grande.");
+    }
     if (isBinary) return kill(conn, 4400, "Solo texto.");
     let msg: any;
     try {
@@ -800,19 +912,20 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
         default: return kill(conn, 4400, "Tipo de mensaje desconocido.");
       }
     } catch (e) {
-      warn(`mensaje ${msg.type}`, e);
+      warn(`mensaje ${msg.type} (ip=${conn.ip}, jugador=${conn.pid})`, e);
       err(conn, msg.type, "Error interno.");
+      kill(conn, 1011, "Error interno.");
     }
   }
 
   wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     const conn: Conn = {
-      ws, ip: deps.clientIp(req), pid: null, sub: false, stamps: [], lastRx: Date.now(), authTimer: null, replaced: false,
+      ws, ip: deps.clientIp(req), pid: null, sub: false, stamps: [], lastRx: Date.now(), authTimer: null, replaced: false, strikes: 0,
     };
     conns.add(conn);
     conn.authTimer = setTimeout(() => { if (!conn.pid) kill(conn, 4408, "Falta auth."); }, cfg.authMs);
     ws.on("message", (data, isBinary) => onMessage(conn, data, isBinary));
-    ws.on("close", () => onClose(conn));
+    ws.on("close", () => guard("close", () => onClose(conn)));
     ws.on("error", () => { /* el cierre se maneja en 'close' */ });
   });
 
@@ -825,9 +938,20 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     socket.on("error", () => { /* cliente cortó */ });
     const pathname = (req.url ?? "").split("?", 1)[0];
     if (pathname !== "/ws") return reject(socket, "404 Not Found");
-    if (!access.hostOk(req.headers.host) || !access.originOk(req.headers.origin)) return reject(socket, "403 Forbidden");
-    if (!connLimit.hit(deps.clientIp(req))) return reject(socket, "429 Too Many Requests");
-    if (wss.clients.size >= MAX_SOCKETS) return reject(socket, "503 Service Unavailable");
+    const ip = deps.clientIp(req);
+    // el rechazo es HTTP 403 ANTES del upgrade (el navegador no ve un código 4403: solo falla la conexión)
+    if (!access.hostOk(req.headers.host) || !access.originOk(req.headers.origin)) {
+      logThrottled("up403", `upgrade rechazado 403 (Host/Origin) ip=${ip}`);
+      return reject(socket, "403 Forbidden");
+    }
+    if (!connLimit.hit(ip)) {
+      logThrottled("up429", `upgrade rechazado 429 ip=${ip}`);
+      return reject(socket, "429 Too Many Requests");
+    }
+    if (wss.clients.size >= MAX_SOCKETS) {
+      logThrottled("up503", `upgrade rechazado 503 (sockets al tope) ip=${ip}`);
+      return reject(socket, "503 Service Unavailable");
+    }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
@@ -838,6 +962,7 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
       if (t - c.lastRx > cfg.pingMs * 3) { c.ws.terminate(); continue; }
       if (c.pid) send(c, { type: "ping" });
     }
+    for (const [pid, arr] of starts) if (!arr.some((x) => x > t - 3_600_000)) starts.delete(pid);
   }, cfg.pingMs);
   pinger.unref();
 
@@ -854,12 +979,35 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
       clearInterval(pinger);
       if (lobbyTimer) clearTimeout(lobbyTimer);
       for (const am of [...actives]) {
-        try { store.matchEnd(am.id, null, "void", null, am.log); } catch { /* base cerrada */ }
+        try { store.matchEnd(am.id, null, "void", null, am.log.slice(am.flushed)); } catch { /* base cerrada */ }
         release(am);
       }
       for (const c of challenges.values()) clearTimeout(c.timer);
       for (const c of conns) { try { c.ws.terminate(); } catch { /* nada */ } }
       wss.close();
+    },
+    dropPlayer(pid: string): void {
+      guard("dropPlayer", () => {
+        const peer = peers.get(pid);
+        cancelChallengesOf(pid, "El jugador ya no existe.");
+        leaveQueue(pid);
+        starts.delete(pid);
+        if (peer?.match && !peer.match.ended) abortMatch(peer.match);
+        finished.delete(pid);
+        if (peer) {
+          const c = peer.conn;
+          peers.delete(pid);
+          if (c) {
+            log(`jugador ${pid} borrado por el admin: cierre 4401 ip=${c.ip}`);
+            kill(c, 4401, "Tu cuenta ya no existe.");
+          }
+        }
+        scheduleLobby();
+      });
+    },
+    renamePlayer(pid: string, name: string): void {
+      const peer = peers.get(pid);
+      if (peer) { peer.name = name; scheduleLobby(); }
     },
     stats: () => ({ sockets: conns.size, peers: peers.size, matches: actives.size, challenges: challenges.size, queue: queue.length }),
   };

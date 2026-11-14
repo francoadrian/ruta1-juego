@@ -14,7 +14,7 @@
 // Autoridad (ADR 0002): el cliente ya no decide la colección ni las cartas de un sobre. En la base el save sigue
 // siendo {collection, decks, defeated}; `collection` guarda SOLO lo ganado (`pulled`: sobres y envíos), igual que
 // lo mandaba el cliente viejo, así que las colecciones existentes valen tal cual. Lo que tiene el jugador es
-// ownedCounts(collection) = colección inicial (Brushfire + extras) + collection.
+// ownedCounts(collection) = colección inicial (el mazo Brushfire) + collection.
 //
 // El juego es el único dueño de los datos (data/game.db, catalog.json, world.json, assets/). El backoffice
 // los administra por la API de admin /admin/v1 (server/admin.ts), en un listener aparte:
@@ -30,9 +30,15 @@
 //   ALLOWED_ORIGINS         Origins permitidos (esquema://host[:puerto], admite https://*.ts.net); sin esto, vale
 //                           cualquier http(s) cuyo host esté en ALLOWED_HOSTS. Sin cabecera Origin se acepta.
 //   TRUST_PROXY=1           la IP del cliente sale de la última entrada de X-Forwarded-For (túnel/proxy de confianza)
+//   DEBUG_HEADERS=1         imprime (a stderr) la cadena de IP de cada pedido: socket, X-Forwarded-For y la IP que se usa (para verificar TRUST_PROXY)
 //   MAX_PLAYERS             tope de jugadores (30)
-//   RATE_API_PER_MIN        pedidos /api por IP y minuto (600) · RATE_SIGNUP_PER_MIN altas por IP y minuto (10)
-//   SIGNUP_FAILS_PER_HOUR   intentos de alta fallidos globales por hora antes de bloquear (30)
+//   RATE_API_PER_MIN        pedidos /api por IP y minuto (600) · RATE_STATIC_PER_MIN estáticos y demás por IP y minuto (2400)
+//   RATE_SIGNUP_PER_MIN     altas por IP y minuto (10)
+//   SIGNUP_FAILS_PER_HOUR   intentos de alta fallidos POR IP y hora antes de bloquear (10)
+//   SIGNUP_FAILS_GLOBAL_PER_HOUR  tope global de fallos (1000): al agotarse se loguea y los intentos inválidos se frenan; un código válido nunca se bloquea por esto
+//   MAX_CONNECTIONS         conexiones TCP simultáneas del listener público (512) · MAX_CONNS_PER_IP por IP de socket (40)
+//                           · MAX_CONNS_LOOPBACK para loopback, de donde llegan todos los jugadores detrás de un túnel (300)
+//   MATCH_RETENTION_DAYS    días que se conservan las partidas terminadas en la tabla matches (30)
 //   ADMIN_HOST / ADMIN_PORT listener de admin (127.0.0.1:8125); ADMIN_ALLOW_NONLOOPBACK=1 para otro host
 //   GAME_DB                 base SQLite (por defecto data/game.db)
 //   GAME_DATA_DIR           carpeta de catalog.json / world.json (por defecto data/)
@@ -43,8 +49,8 @@
 import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { copyFileSync, createReadStream, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { pipeline } from "node:stream";
 import { cli as adminCli, makeAdminServer } from "./admin.ts";
 import { Content } from "./content.ts";
 import { validateDecks } from "./decks.ts";
@@ -72,11 +78,28 @@ const envInt = (name: string, dflt: number): number => {
 };
 const MAX_PLAYERS = envInt("MAX_PLAYERS", 30);
 const TRUST_PROXY = process.env.TRUST_PROXY === "1";
-const { access: ACCESS, lanWarning: LAN_WARNING } = accessFromEnv(process.env, HOST);
+const DEBUG_HEADERS = process.env.DEBUG_HEADERS === "1";
+const { access: ACCESS, lanWarning: LAN_WARNING } = accessFromEnv(process.env, HOST, PORT);
 const API_LIMIT = new RateLimiter(envInt("RATE_API_PER_MIN", 600), 60_000);
+const STATIC_LIMIT = new RateLimiter(envInt("RATE_STATIC_PER_MIN", 2400), 60_000); // estáticos y cualquier otra ruta: generoso (una visita pide ~30 archivos)
 const SIGNUP_LIMIT = new RateLimiter(envInt("RATE_SIGNUP_PER_MIN", 10), 60_000);
-const SIGNUP_FAILS = new FailureBudget(envInt("SIGNUP_FAILS_PER_HOUR", 30), 3_600_000);
+const SIGNUP_FAILS = new FailureBudget(envInt("SIGNUP_FAILS_PER_HOUR", 10), envInt("SIGNUP_FAILS_GLOBAL_PER_HOUR", 1000), 3_600_000);
+const MAX_CONNS = envInt("MAX_CONNECTIONS", 512);
+const MAX_CONNS_PER_IP = envInt("MAX_CONNS_PER_IP", 40);
+const MAX_CONNS_LOOPBACK = envInt("MAX_CONNS_LOOPBACK", 300);
 const TOO_MANY = "Demasiados intentos. Probá en un rato.";
+
+// Logs a stderr (una línea por evento). NUNCA tokens ni códigos de invitación: solo ids e IP.
+const logLine = (msg: string): void => void process.stderr.write(`${new Date().toISOString()} [juego] ${msg}\n`);
+const lastLog = new Map<string, number>();
+/** Como logLine, pero a lo sumo una vez por segundo por clave (un flood no inunda los logs). */
+function logThrottled(key: string, msg: string): void {
+  const t = Date.now();
+  if (t - (lastLog.get(key) ?? 0) < 1000) return;
+  lastLog.set(key, t);
+  if (lastLog.size > 500) for (const [k, v] of lastLog) if (t - v > 60_000) lastLog.delete(k);
+  logLine(msg);
+}
 
 /** IP del cliente. Con un túnel todo llega de loopback: solo se mira X-Forwarded-For si TRUST_PROXY=1. */
 function clientIp(req: IncomingMessage): string {
@@ -85,6 +108,15 @@ function clientIp(req: IncomingMessage): string {
     if (xff.length) return xff[xff.length - 1];
   }
   return req.socket.remoteAddress ?? "?";
+}
+
+let debugLeft = 200; // DEBUG_HEADERS: solo las primeras líneas, para no llenar el disco
+/** DEBUG_HEADERS=1: imprime SOLO la cadena de IP (socket, X-Forwarded-For y la elegida), nunca otras cabeceras ni cookies. */
+function debugIp(req: IncomingMessage): void {
+  if (!DEBUG_HEADERS || debugLeft <= 0) return;
+  debugLeft--;
+  const xff = String(req.headers["x-forwarded-for"] ?? "").replace(/[^0-9a-fA-F:.,\s]/g, "?").slice(0, 200);
+  logLine(`[debug-ip] socket=${req.socket.remoteAddress ?? "?"} x-forwarded-for=[${xff}] usada=${clientIp(req)} trust_proxy=${TRUST_PROXY ? 1 : 0}${debugLeft === 0 ? " (último aviso)" : ""}`);
 }
 
 // Solo se publica lo que el juego necesita (nunca la base de datos).
@@ -123,17 +155,25 @@ export function safePublicPath(raw: string): string | null {
 }
 
 // ------------------------------------------------------------------ respuestas
-const BASE_HEADERS = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
+/**
+ * CSP mínima. index.html transpila src/*.ts en el navegador y los ejecuta como <script> en línea creados desde JS
+ * (textContent), por eso script-src necesita 'unsafe-inline'. 'unsafe-eval' NO hace falta (se verificó en Chrome sin él).
+ * Lo demás sí se cierra: nada de embeber el juego (frame-ancestors), objetos, <base> ni formularios a otro sitio, y las
+ * conexiones solo al propio origen (fetch/WebSocket). Las imágenes admiten data:/blob: por el canvas.
+ */
+const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+  "font-src 'self'; connect-src 'self' ws: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+const BASE_HEADERS = {
+  "Cache-Control": "no-store",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+};
 
 function sendJson(res: ServerResponse, status: number, obj: unknown): void {
   const body = Buffer.from(JSON.stringify(obj), "utf8");
   res.writeHead(status, { ...BASE_HEADERS, "Content-Type": "application/json; charset=utf-8", "Content-Length": body.length });
   res.end(body);
-}
-
-function sendBytes(res: ServerResponse, ctype: string, body: Buffer, head: boolean, extra: Record<string, string> = {}): void {
-  res.writeHead(200, { ...BASE_HEADERS, ...extra, "Content-Type": ctype, "Content-Length": body.length });
-  res.end(head ? undefined : body);
 }
 
 function notFound(res: ServerResponse, head = false): void {
@@ -198,11 +238,15 @@ async function servePublic(req: IncomingMessage, res: ServerResponse, p: string,
       return void res.end();
     }
   }
-  try {
-    sendBytes(res, ctype, await readFile(f), head, extra);
-  } catch {
-    notFound(res, head);
-  }
+  const headers: Record<string, string | number> = { ...BASE_HEADERS, ...extra, "Content-Type": ctype, "Content-Length": size };
+  if (p === "/index.html") headers["Content-Security-Policy"] = CSP;
+  res.writeHead(200, headers);
+  if (head || size === 0) return void res.end();
+  // en streaming y con contrapresión (pipeline): un cliente lento o que no lee no hace que el servidor guarde el archivo entero en memoria
+  const file = createReadStream(f, { start: 0, end: size - 1 });
+  pipeline(file, res, (err) => {
+    if (err) res.destroy(); // el cliente cortó o el archivo cambió a mitad de camino
+  });
 }
 
 // ------------------------------------------------------------------ rutas
@@ -214,9 +258,22 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   const apiPath = url.split("?", 1)[0];
 
   // DNS rebinding / CSRF: Host y Origin tienen que estar permitidos (también para los estáticos).
-  if (!ACCESS.hostOk(req.headers.host)) return sendJson(res, 403, { error: "Host no permitido." });
-  if (!ACCESS.originOk(req.headers.origin)) return sendJson(res, 403, { error: "Origin no permitido." });
-  if (apiPath.startsWith("/api/") && !API_LIMIT.hit(clientIp(req))) return sendJson(res, 429, { error: TOO_MANY });
+  debugIp(req);
+  if (!ACCESS.hostOk(req.headers.host)) {
+    logThrottled("403host", `403 Host no permitido ip=${clientIp(req)}`);
+    return sendJson(res, 403, { error: "Host no permitido." });
+  }
+  if (!ACCESS.originOk(req.headers.origin)) {
+    logThrottled("403origin", `403 Origin no permitido ip=${clientIp(req)}`);
+    return sendJson(res, 403, { error: "Origin no permitido." });
+  }
+  const ip = clientIp(req);
+  // /api tiene su límite; todo lo demás (estáticos, rutas desconocidas, POST a cualquier lado) otro, más generoso
+  if (!(apiPath.startsWith("/api/") ? API_LIMIT : STATIC_LIMIT).hit(ip)) {
+    logThrottled(`429:${ip}`, `429 límite de pedidos ip=${ip}`);
+    res.setHeader("Connection", "close");
+    return sendJson(res, 429, { error: TOO_MANY });
+  }
 
   if (method === "HEAD") {
     const p = apiPath.startsWith("/api/") ? null : safePublicPath(url);
@@ -242,6 +299,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
 
   if (method === "POST") {
+    if (apiPath !== "/api/players" && !/^\/api\/me\/mail\/(\d+)\/claim$/.test(apiPath)) {
+      res.setHeader("Connection", "close"); // ruta desconocida: ni se lee el cuerpo
+      return notFound(res);
+    }
     let body: unknown;
     try {
       body = await readJson(req);
@@ -251,7 +312,10 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
 
     if (apiPath === "/api/players") {
-      if (!SIGNUP_LIMIT.hit(clientIp(req)) || SIGNUP_FAILS.blocked()) return sendJson(res, 429, { error: TOO_MANY });
+      if (!SIGNUP_LIMIT.hit(ip) || SIGNUP_FAILS.blocked(ip)) {
+        logThrottled(`429signup:${ip}`, `429 altas: límite o intentos fallidos agotados ip=${ip}`);
+        return sendJson(res, 429, { error: TOO_MANY });
+      }
       if (!isObj(body)) return sendJson(res, 400, { error: "El cuerpo debe ser un objeto JSON." });
       if (body.name !== undefined && typeof body.name !== "string") return sendJson(res, 400, { error: "El nombre debe ser texto." });
       try {
@@ -259,13 +323,25 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         const [player, token] = STORE.createPlayer(body.name, body.invite, MAX_PLAYERS);
         player.token = token;
         player.mail = [];
+        logLine(`alta jugador=${player.id} ip=${ip}`);
         return sendJson(res, 201, player);
       } catch (e) {
         if (e instanceof InviteError) {
-          SIGNUP_FAILS.fail();
+          SIGNUP_FAILS.fail(ip);
+          if (SIGNUP_FAILS.globalExhausted()) {
+            // último recurso: el presupuesto global de fallos se agotó (ataque distribuido). Un código válido NUNCA llega acá
+            // (se creó el jugador arriba); los inválidos se frenan con una demora y un 429.
+            logThrottled("signup-global", "ATENCIÓN: se agotó el tope global de intentos de alta fallidos (SIGNUP_FAILS_GLOBAL_PER_HOUR)");
+            await new Promise((r) => setTimeout(r, 1000));
+            return sendJson(res, 429, { error: TOO_MANY });
+          }
+          logThrottled(`invite:${ip}`, `invitación inválida o agotada ip=${ip}`);
           return sendJson(res, 403, { error: "Código de invitación inválido o usado." });
         }
-        if (e instanceof PlayersFull) return sendJson(res, 503, { error: "El servidor está lleno." });
+        if (e instanceof PlayersFull) {
+          logThrottled("full", `alta rechazada: servidor lleno (MAX_PLAYERS) ip=${ip}`);
+          return sendJson(res, 503, { error: "El servidor está lleno." });
+        }
         throw e;
       }
     }
@@ -376,15 +452,21 @@ function inviteCli(args: string[], store: Store): number {
 /** vendor/typescript.js lo necesita el navegador (/vendor/typescript.js). Si falta, se copia desde node_modules (como tools/vendor.mjs). */
 function ensureVendor(): void {
   const out = path.join(ROOT, "vendor", "typescript.js");
-  if (existsSync(out)) return;
   const src = path.join(ROOT, "node_modules", "typescript", "lib", "typescript.js");
   if (!existsSync(src)) {
-    console.error('Falta vendor/typescript.js y typescript no está instalado. Corré "npm ci" y después "node tools/vendor.mjs".');
-    process.exit(1);
+    if (!existsSync(out)) {
+      console.error('Falta vendor/typescript.js y typescript no está instalado. Corré "npm ci" y después "node tools/vendor.mjs".');
+      process.exit(1);
+    }
+    console.error('AVISO: no hay node_modules/typescript: no puedo verificar que vendor/typescript.js sea el original. Corré "npm ci".');
+    return;
   }
+  // lo que se le sirve al navegador tiene que ser idéntico (byte a byte) al paquete fijado en package-lock.json
+  if (existsSync(out) && readFileSync(out).equals(readFileSync(src))) return;
+  const existed = existsSync(out);
   mkdirSync(path.dirname(out), { recursive: true });
   copyFileSync(src, out);
-  console.log("vendor/typescript.js generado desde node_modules.");
+  console.log(existed ? "vendor/typescript.js no coincidía con node_modules/typescript: regenerado." : "vendor/typescript.js generado desde node_modules.");
 }
 
 function main(): void {
@@ -414,21 +496,76 @@ function main(): void {
     console.error(`No pude abrir ${what}: ${e.message}`);
     process.exit(1);
   };
-  const admin = makeAdminServer(STORE, CONTENT);
+  // errores que se escapan de un manejador (un bug, la base bloqueada): se registran y el servidor sigue. Si se repiten
+  // sin parar (más de 25 en un minuto) algo está roto de verdad: se sale con error para que lo reinicie quien lo supervisa.
+  let escaped: number[] = [];
+  const survive = (kind: string) => (e: unknown): void => {
+    logLine(`${kind}: ${(e as Error)?.stack ?? e}`);
+    const t = Date.now();
+    escaped = escaped.filter((x) => x > t - 60_000);
+    escaped.push(t);
+    if (escaped.length > 25) {
+      logLine("demasiados errores seguidos: salgo.");
+      process.exit(1);
+    }
+  };
+  process.on("uncaughtException", survive("uncaughtException"));
+  process.on("unhandledRejection", survive("unhandledRejection"));
+
+  let wsHandle: ReturnType<typeof attachWs> | null = null;
+  const admin = makeAdminServer(STORE, CONTENT, {
+    playerDeleted: (pid) => wsHandle?.dropPlayer(pid),
+    playerRenamed: (pid, name) => wsHandle?.renamePlayer(pid, name),
+  });
   admin.on("error", onError("la API de admin"));
   admin.listen(ADMIN_PORT, ADMIN_HOST, () => console.log(`API de admin en http://${ADMIN_HOST}:${ADMIN_PORT}/admin/v1  (Bearer token)`));
 
-  const srv = http.createServer((req, res) => {
+  const srv = http.createServer({ connectionsCheckingInterval: 5000 }, (req, res) => {
     handle(req, res).catch((e) => {
-      process.stderr.write(`[juego] error interno: ${e?.stack ?? e}\n`);
+      logLine(`error interno: ${e?.stack ?? e}`);
       if (!res.headersSent) sendJson(res, 500, { error: "Error interno." });
       else res.end();
+    });
+  });
+  // Tiempos y topes contra clientes lentos o que abren sockets sin parar (slowloris, lectores que no leen)
+  srv.maxConnections = MAX_CONNS;
+  srv.headersTimeout = 15_000;
+  srv.requestTimeout = 30_000;
+  srv.keepAliveTimeout = 10_000;
+  srv.setTimeout(120_000); // socket sin actividad (por ejemplo, uno que pidió un archivo y no lo lee): se cierra. El WebSocket lo apaga al hacer el upgrade
+  const connsByIp = new Map<string, number>();
+  srv.on("connection", (sock) => {
+    const ip = sock.remoteAddress ?? "?";
+    const loopback = ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    const n = (connsByIp.get(ip) ?? 0) + 1;
+    if (n > (loopback ? MAX_CONNS_LOOPBACK : MAX_CONNS_PER_IP)) {
+      logThrottled(`connip:${ip}`, `conexión rechazada: demasiadas simultáneas ip=${ip}`);
+      sock.destroy();
+      return;
+    }
+    connsByIp.set(ip, n);
+    sock.once("close", () => {
+      const c = (connsByIp.get(ip) ?? 1) - 1;
+      if (c <= 0) connsByIp.delete(ip); else connsByIp.set(ip, c);
     });
   });
   srv.on("error", onError("el juego"));
   srv.listen(PORT, HOST, () => console.log(`Juego en http://${HOST === "127.0.0.1" ? "localhost" : HOST}:${PORT}/  (Ctrl+C para cerrar)`));
   // WebSocket /ws (ADR 0002, 3.2): lobby, desafíos, cola y partidas; el upgrade valida Host y Origin antes de aceptar
   const ws = attachWs(srv, { store: STORE, content: CONTENT, engine: ENGINE, access: ACCESS, clientIp });
+  wsHandle = ws;
+  // las partidas terminadas se guardan para depurar (log de intents), no como historial: se podan por antigüedad
+  const retention = envInt("MATCH_RETENTION_DAYS", 30);
+  const prune = (): void => {
+    try {
+      const n = STORE.pruneMatches(retention);
+      if (n) logLine(`partidas viejas borradas (más de ${retention} días): ${n}`);
+    } catch (e) {
+      logLine(`no pude podar partidas: ${(e as Error)?.message}`);
+    }
+  };
+  prune();
+  setInterval(prune, 6 * 3600_000).unref();
   const bye = () => { ws.close(); srv.close(); admin.close(); STORE.close(); process.exit(0); };
   process.on("SIGINT", bye);
   process.on("SIGTERM", bye);

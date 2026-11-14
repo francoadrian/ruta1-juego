@@ -12,12 +12,16 @@
     "test": "node --test --no-warnings tests/engine.test.ts tests/view.test.ts tests/packs.test.ts tests/driver.test.ts",
     "test:api": "node --no-warnings tests/run-against-node.mjs",
     "test:server": "node --test --no-warnings tests/server.config.test.ts",
-    "test:ws": "node --test --no-warnings tests/ws.test.ts"
+    "test:ws": "node --test --no-warnings tests/ws.test.ts",
+    "test:hardening": "node --test --no-warnings tests/hardening.test.ts",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p tsconfig.server.json"
   },
   "dependencies": {
     "ws": "8.23.0"
   },
   "devDependencies": {
+    "@types/node": "24.19.2",
+    "@types/ws": "8.18.2",
     "typescript": "5.9.3"
   }
 }

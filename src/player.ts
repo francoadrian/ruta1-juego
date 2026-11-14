@@ -112,7 +112,8 @@ function readPlayerDecks(data: PlayerDecks): PlayerDecks {
         name: String(d.name || "Mazo").slice(0, DECK_NAME_MAX),
         cards: (d.cards ?? [])
           .filter((e) => isPlayable(e.id) && e.qty > 0)
-          .map((e) => ({ id: e.id, qty: Math.min(e.qty, ownedQty(e.id)) })),
+          .map((e) => ({ id: e.id, qty: Math.min(e.qty, ownedQty(e.id)) }))
+          .filter((e) => e.qty > 0), // lo que ya no tiene (p. ej. cartas que ya no se regalan) se saca de la vista; el mazo queda incompleto, no se rompe
       }));
     if (!decks.length) return defaultPlayerDecks();
     const res: PlayerDecks = { decks, mainId: data.mainId, nextId: Math.max(data.nextId || 1, decks.length + 1) };

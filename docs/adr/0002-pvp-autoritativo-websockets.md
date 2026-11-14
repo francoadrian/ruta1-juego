@@ -54,7 +54,7 @@ Reglas de `applyIntent`: resuelve `Ref`→índice en el momento; exige `cur === 
  "p":[{"name":"FRAN","deckName":"Brushfire","hand":[{"uid":17,"id":"charmander"}],"deck":41,"prizes":6,
        "discard":[{"uid":9,"id":"potion"}],"active":{"uid":12,"stack":[{"uid":12,"id":"vulpix"}],"energy":[],"damage":10,"...":"resto de Slot"},
        "bench":[],"turns":2,"mulligans":0},
-      {"name":"TOMI","deckName":"Overgrowth","hand":7,"deck":40,"prizes":6,"discard":[],"active":{"...":"Slot"},"bench":[],"turns":2,"mulligans":1}]}
+      {"name":"TOMI","deckName":"","hand":7,"deck":40,"prizes":6,"discard":[],"active":{"...":"Slot"},"bench":[],"turns":2,"mulligans":1}]}
 ```
 Mazo y premios: siempre **cantidad** (también los propios). Mano rival: cantidad. En setup, Activo/Banca rivales van como `null`/cantidad hasta que ambos terminen. Nunca viaja `rng`, semilla ni `uidNext`. El cliente rehidrata `id→CARDS[id]` y la mano rival como dorsos.
 
@@ -82,7 +82,7 @@ Handshake: `Origin` ∈ `ALLOWED_ORIGINS` y `Host` ∈ `ALLOWED_HOSTS`, si no 40
 | S→C | `match.over` | `{"match":"M-9F3K","winner":"you"\|"opp"\|"draw","reason":"normal"\|"surrender"\|"timeout"\|"abandon","reward":{"booster":"baseSet","cards":["..."],"defeated":2}\|null}` |
 | ambos | `ping` / `pong` | `{}` cada 25 s (Cloudflare corta conexiones ociosas a los 100 s) |
 
-Cierres: 4400 mensaje inválido, 4401 token inválido, 4403 Origin/Host, 4408 sin `auth` a tiempo, 4409 reemplazada por otra pestaña (una conexión por jugador; la nueva gana), 4429 exceso (>20 msg/s o >16 KB).
+Origin/Host no permitidos: el rechazo es un **HTTP 403 antes del upgrade** (no hay cierre 4403: el navegador solo ve que la conexión falla). Cierres: 1011 error interno (esa conexión se cierra; el servidor sigue), 4400 mensaje inválido, 4401 token inválido, 4408 sin `auth` a tiempo, 4409 reemplazada por otra pestaña (una conexión por jugador; la nueva gana), 4429 exceso (>20 msg/s o >16 KB).
 Tiempos (env): `TURN_SECONDS=90` por decisión → al vencer se aplica `defaultIntent`; 3 vencimientos seguidos = derrota `timeout`. Desconexión: gracia `GRACE_SECONDS=90` (el reloj sigue) → derrota `abandon`. Desafío vence a los 60 s. Una partida activa por jugador. NPC: el servidor corre `stepAI` cada 0,8 s y emite `match.state` por paso. Si el servidor se reinicia, las partidas en curso se anulan sin resultado (el log de intents queda para depurar/replay).
 
 ### 3.3 HTTP de jugador (cambia) — `/admin/v1` no se toca
@@ -121,8 +121,9 @@ CLI: `invite new [--uses 1] [--days 7] [etiqueta]` (muestra el código una vez),
 - No se confía en el cliente: colección, `defeated`, cartas de sobres, premios, resultado de partidas, orden del mazo, monedas. El cliente solo manda `Intent`s y mazos (validados contra `ownedCounts` al guardar y con `deckProblems` al empezar).
 - `viewFor` es la única salida del estado de una partida; el test 3 lo vigila. Revisar textos de `log` que revelen cartas ocultas.
 - WS: auth por primer mensaje (el token no va en la URL), Origin/Host en el upgrade (evita CSWSH), límites de tamaño/frecuencia, `n` deduplicado, partida y turno verificados en cada intent.
-- Altas: código de invitación hasheado, de uso limitado, más tope global de intentos fallidos (30/h) y `MAX_PLAYERS`. **Nada se exime por venir de 127.0.0.1**: con túnel, todo llega desde loopback.
+- Altas: código de invitación guardado como HMAC-SHA256 con una clave del servidor (tabla `config`; las filas viejas con sha256 se aceptan y se migran solas), de uso limitado, más presupuesto de intentos fallidos **por IP** (10/h) con un tope global muy alto (1000/h) solo como último recurso (un código válido nunca se bloquea por el global) y `MAX_PLAYERS`. **Nada se exime por venir de 127.0.0.1**: con túnel, todo llega desde loopback.
 - Red: `GAME_HOST=127.0.0.1` por defecto (el túnel entra por loopback); `0.0.0.0` solo si se pide LAN. El túnel/serve apunta **solo** al puerto del juego, nunca al de admin. Tailscale: `tailscale serve --bg 8123` (HTTPS, solo tu tailnet; **no** usar Funnel). Cloudflare: `cloudflared` + Cloudflare Access obligatorio.
+- Endurecimiento posterior a la auditoría (sin cambiar el contrato): una excepción en un manejador del WS cierra esa conexión con 1011 y el proceso sigue (`uncaughtException`/`unhandledRejection` se registran); `busy_timeout` de SQLite 2 s; estáticos en streaming con contrapresión, `maxConnections`, tope de conexiones por IP y tiempos de headers/pedido; límite de pedidos también para estáticos; log de intents con la copia limpia del parser (`mParse`), máx. 2000 entradas / 256 KB y agregado incremental; máx. 6 partidas por minuto y 60 por hora por jugador (error no fatal; si insiste, 4429); poda de `matches` (`MATCH_RETENTION_DAYS`, 30); contra un NPC los premios los fija el servidor (6, o `def.prizes`); la vista `BattleView` solo trae el `deckName` propio (el del rival va vacío); borrar un jugador por la API de admin cierra su socket con 4401 y anula su partida (renombrar solo refresca el nombre); nombres de jugador saneados (sin caracteres invisibles ni de dirección) y únicos sin distinguir mayúsculas; cabeceras `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` y CSP (ver `docs/hosting.md`); `Host` parseado con `new URL` y, para nombres de loopback, con el puerto del juego.
 - `typescript.js` y la fuente se sirven desde el propio servidor (versión fijada por `package-lock` con hash de integridad). En B/C: atributo `integrity` + `crossorigin` en `index.html:114`.
 
 ## 6. Alternativas descartadas

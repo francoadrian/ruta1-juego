@@ -566,15 +566,8 @@ const OVERGROWTH: Deck = {
 //  Colección y mazos del jugador
 // =====================================================================
 
-/** Cartas sueltas que el jugador tiene además de las del mazo Brushfire (para probar el editor). */
-const EXTRA_OWNED: DeckEntry[] = [
-  { id: "charizard", qty: 4 },
-  { id: "nidorino", qty: 4 },
-  { id: "nidoking", qty: 4 },
-];
-
 // Cartas deshabilitadas o borradas en el backoffice: fuera de los mazos fijos.
-for (const list of [BRUSHFIRE.cards, OVERGROWTH.cards, EXTRA_OWNED]) {
+for (const list of [BRUSHFIRE.cards, OVERGROWTH.cards]) {
   const keep = list.filter((e) => isPlayable(e.id));
   list.length = 0;
   list.push(...keep);
@@ -595,7 +588,7 @@ const copiesByName = (deck: Deck, name: string): number =>
   deck.cards.filter((e) => CARDS[e.id].name === name).reduce((n, e) => n + e.qty, 0);
 
 /**
- * Copias que tiene un jugador de cada carta: la colección inicial (Brushfire + EXTRA_OWNED)
+ * Copias que tiene un jugador de cada carta: la colección inicial (el mazo Brushfire)
  * más lo ganado (`pulled`: id → copias). Solo cuenta cartas habilitadas. Puro: no toca el navegador.
  */
 function ownedCounts(pulled: Record<string, number>): Record<string, number> {
@@ -604,7 +597,6 @@ function ownedCounts(pulled: Record<string, number>): Record<string, number> {
     if (isPlayable(id) && q > 0) out[id] = (out[id] ?? 0) + q;
   };
   for (const e of BRUSHFIRE.cards) add(e.id, e.qty);
-  for (const e of EXTRA_OWNED) add(e.id, e.qty);
   for (const [id, q] of Object.entries(pulled)) add(id, q);
   return out;
 }

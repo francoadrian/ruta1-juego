@@ -80,7 +80,7 @@ async function startServer(extra: Record<string, string> = {}, reuse?: { dir: st
     ...process.env, GAME_PORT: String(port), ADMIN_HOST: "127.0.0.1", ADMIN_PORT: String(adminPort), GAME_DB: db,
     GAME_DATA_DIR: path.join(dir, "data"), GAME_ASSETS_DIR: path.join(dir, "assets"),
     RATE_API_PER_MIN: "100000", RATE_SIGNUP_PER_MIN: "100000", SIGNUP_FAILS_PER_HOUR: "100000", MAX_PLAYERS: "100",
-    WS_MSGS_PER_SEC: "100000", WS_CONN_PER_MIN: "100000", NPC_STEP_MS: "5", ...extra,
+    WS_MSGS_PER_SEC: "100000", WS_CONN_PER_MIN: "100000", NPC_STEP_MS: "5", MATCH_STARTS_PER_MIN: "100000", MATCH_STARTS_PER_HOUR: "100000", ...extra,
   };
   for (const k of ["GAME_HOST", "ALLOWED_HOSTS", "ALLOWED_ORIGINS", "TRUST_PROXY"]) delete env[k];
   const child = spawn(process.execPath, ["--no-warnings", "server/main.ts"], { cwd: ROOT, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -992,5 +992,210 @@ describe("WebSocket: reinicio del servidor", () => {
     } finally {
       await s2.stop();
     }
+  });
+});
+
+// ================================================================== endurecimiento (auditoría de seguridad)
+/** Token de admin nuevo (CLI) y pedido a la API de admin del servidor de prueba. */
+function adminCall(s: Srv, method: string, p: string, body?: unknown): Promise<{ status: number; json: any }> {
+  const r = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "admin-token", "new", "test"], { cwd: ROOT, env: s.env, encoding: "utf8" });
+  const token = /\n(\S{20,})\s*$/.exec(r.stdout)?.[1];
+  assert.ok(token, r.stdout + r.stderr);
+  return new Promise((resolve, reject) => {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (payload !== undefined) { headers["Content-Type"] = "application/json"; headers["Content-Length"] = String(Buffer.byteLength(payload)); }
+    const q = http.request({ hostname: "127.0.0.1", port: Number(s.env.ADMIN_PORT), method, path: p, headers, agent: false }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        let json: any;
+        try { json = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch { /* sin JSON */ }
+        resolve({ status: res.statusCode || 0, json });
+      });
+    });
+    q.on("error", reject);
+    if (payload !== undefined) q.write(payload);
+    q.end();
+  });
+}
+const matchRow = (s: Srv, id: string): any => {
+  const db = new DatabaseSync(s.db, { readOnly: true });
+  try { return db.prepare("SELECT * FROM matches WHERE id=?").get(id); } finally { db.close(); }
+};
+
+describe("Endurecimiento: M1, un error de la base durante auth no tumba el servidor", () => {
+  it("con la base bloqueada, la auth cierra esa conexión con 1011 (sin token en el log) y el servidor sigue vivo", { timeout: 30000 }, async () => {
+    const s = await startServer();
+    const p = await newPlayer(s, "Ana");
+    const lock = new DatabaseSync(s.db);
+    lock.exec("BEGIN IMMEDIATE"); // otro proceso toma el lock de escritura: playerByToken (que anota last_seen) falla tras el busy_timeout
+    try {
+      const c = await Client.open(s.port);
+      c.send({ type: "auth", token: p.token, v: 1 });
+      assert.equal(await c.closed(15000), 1011);
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+    }
+    const c2 = await Client.login(s.port, p); // el servidor sigue andando
+    c2.send({ type: "ping" });
+    await c2.take("pong");
+    assert.ok(!s.out().includes(p.token), "el log no debe tener el token");
+    assert.match(s.out(), /\[ws\] mensaje/);
+    c2.close();
+    await s.stop();
+  });
+});
+
+describe("Endurecimiento: M3, log de partidas, tope de partidas por jugador y poda", () => {
+  it("el log guarda la copia limpia de la intención (sin campos de más), se agrega de a lotes y queda como JSON válido", async () => {
+    const s = await startServer();
+    const p = await newPlayer(s, "Ana");
+    const c = await Client.login(s.port, p);
+    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+    const start = await c.take("match.start");
+    const first: any = decide(start.view, new Set());
+    c.send({ type: "match.intent", match: start.match, n: 0, intent: { ...first, junk: "x".repeat(3000) } });
+    await c.take((m) => m.type === "match.state" && m.ack === 0);
+    const r = await playBot(c, start.match, { maxIntents: 400 });
+    assert.ok(r.over);
+    await sleep(200);
+    const row = matchRow(s, start.match);
+    const log = JSON.parse(row.intents);
+    assert.ok(Array.isArray(log) && log.length >= 2, `largo ${log.length}`);
+    const firstLog = log.find((e: any) => e.n === 0);
+    assert.deepEqual(firstLog.it, JSON.parse(JSON.stringify(first)), "la intención se guarda sin los campos que mandó de más");
+    assert.ok(!row.intents.includes("xxxxxxxx"), "no se guarda el JSON crudo del cliente");
+    c.close();
+    await s.stop();
+  });
+
+  it("MATCH_LOG_MAX_ENTRIES: el log se corta con una marca `truncated`", async () => {
+    const s = await startServer({ MATCH_LOG_MAX_ENTRIES: "2" });
+    const p = await newPlayer(s, "Ana");
+    const c = await Client.login(s.port, p);
+    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+    const start = await c.take("match.start");
+    const r = await playBot(c, start.match, { first: start, maxIntents: 400 });
+    assert.ok(r.over);
+    await sleep(200);
+    const log = JSON.parse(matchRow(s, start.match).intents);
+    assert.ok(log.length <= 3, `largo ${log.length}`);
+    assert.deepEqual(log[log.length - 1], { k: "truncated" });
+    c.close();
+    await s.stop();
+  });
+
+  it("límite de partidas por jugador: error no fatal al pasarse y cierre 4429 si insiste", { timeout: 30000 }, async () => {
+    const s = await startServer({ MATCH_STARTS_PER_MIN: "2" });
+    const p = await newPlayer(s, "Ana");
+    const c = await Client.login(s.port, p);
+    for (let i = 0; i < 2; i++) {
+      c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+      const st = await c.take("match.start");
+      c.send({ type: "match.intent", match: st.match, n: 0, intent: { t: "surrender" } });
+      await c.take("match.over");
+    }
+    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+    assert.match((await c.take("error")).error, /demasiadas partidas/);
+    c.send({ type: "ping" });
+    await c.take("pong"); // sigue conectado
+    for (let i = 0; i < 6; i++) c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+    assert.equal(await c.closed(), 4429);
+    assert.match(s.out(), /cierre 4429 \(demasiadas partidas\)/);
+    await s.stop();
+  });
+});
+
+describe("Endurecimiento: B4, B8, deckName y mazos con cartas que ya no se regalan", () => {
+  let s: Srv;
+  before(async () => { s = await startServer(); });
+  after(() => s.stop());
+
+  it("B8: contra un NPC los premios los fija el servidor (6): el `prizes` del cliente se ignora", async () => {
+    const p = await newPlayer(s, "Ana");
+    const c = await Client.login(s.port, p);
+    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1", prizes: 1 });
+    const st = await c.take("match.start");
+    assert.equal(st.view.prizeCount, 6);
+    c.close();
+  });
+
+  it("deckName: cada uno ve solo el nombre de su propio mazo", async () => {
+    const pa = await newPlayer(s, "Ana2");
+    const pb = await newPlayer(s, "Beto2");
+    const a = await Client.login(s.port, pa);
+    const b = await Client.login(s.port, pb);
+    const { sa, sb } = await startPvp(s, a, pa, b, pb, 6);
+    assert.equal(sa.view.p[0].deckName, "Fuego");
+    assert.equal(sa.view.p[1].deckName, "");
+    assert.equal(sb.view.p[0].deckName, "Fuego");
+    assert.equal(sb.view.p[1].deckName, "");
+    a.send({ type: "match.intent", match: sa.match, n: 0, intent: { t: "surrender" } });
+    await a.take("match.over");
+    a.close();
+    b.close();
+  });
+
+  it("B4: borrar al jugador por el admin cierra su socket con 4401 y anula su partida (el rival se entera)", async () => {
+    const pa = await newPlayer(s, "Ana3");
+    const pb = await newPlayer(s, "Beto3");
+    const a = await Client.login(s.port, pa);
+    const b = await Client.login(s.port, pb);
+    const { sa } = await startPvp(s, a, pa, b, pb, 6);
+    const r = await adminCall(s, "DELETE", `/admin/v1/players/${pa.id}`);
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(await a.closed(), 4401);
+    const over = await b.take("match.over");
+    assert.equal(over.reason, "void");
+    await sleep(100);
+    assert.equal(matchRow(s, sa.match).reason, "void");
+    b.send({ type: "ping" }); // el rival sigue conectado
+    await b.take("pong");
+    b.close();
+  });
+
+  it("B4: renombrar al jugador por el admin lo refleja en el lobby sin desconectarlo", async () => {
+    const pa = await newPlayer(s, "Ana4");
+    const pb = await newPlayer(s, "Beto4");
+    const a = await Client.login(s.port, pa);
+    const b = await Client.login(s.port, pb);
+    b.send({ type: "lobby.sub" });
+    await b.take((m) => m.type === "lobby" && m.online.some((o: any) => o.id === pa.id));
+    const r = await adminCall(s, "PATCH", `/admin/v1/players/${pa.id}`, { name: "Renombrada" });
+    assert.equal(r.status, 200);
+    await b.take((m) => m.type === "lobby" && m.online.some((o: any) => o.id === pa.id && o.name === "Renombrada"));
+    a.send({ type: "ping" });
+    await a.take("pong");
+    a.close();
+    b.close();
+  });
+
+  it("EXTRA_OWNED eliminado: un mazo guardado con cartas que ya no tiene falla con un mensaje claro; el servidor sigue y el mazo no se borra", async () => {
+    const p = await newPlayer(s, "Carla", false);
+    // mazo "viejo": 60 cartas con 4 Charizard (que antes regalaba el servidor). Se escribe directo en la DB TEMPORAL del test.
+    const legacy = FUEGO.filter((e) => e.id !== "charmander").map((e) => ({ ...e }));
+    legacy.push({ id: "charizard", qty: 4 });
+    const missing = 60 - legacy.reduce((n, e) => n + e.qty, 0);
+    legacy.push({ id: "charmander", qty: missing });
+    const db = new DatabaseSync(s.db);
+    const row: any = db.prepare("SELECT save FROM players WHERE id=?").get(p.id);
+    const save = JSON.parse(row.save);
+    save.decks = { decks: [{ id: "d1", name: "Viejo", cards: legacy }], mainId: "d1", nextId: 2 };
+    db.prepare("UPDATE players SET save=?, rev=rev+1 WHERE id=?").run(JSON.stringify(save), p.id);
+    db.close();
+    const c = await Client.login(s.port, p);
+    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1" });
+    assert.match((await c.take("error")).error, /Solo tenés 0 Charizard/);
+    // no se rompió nada: /api/me sigue andando y el mazo sigue guardado tal cual
+    const me = await httpJson(s.port, "GET", "/api/me", { token: p.token });
+    assert.equal(me.status, 200);
+    assert.ok(me.json.save.decks.decks[0].cards.some((e: any) => e.id === "charizard" && e.qty === 4));
+    c.send({ type: "queue.join", deckId: "d1" });
+    assert.match((await c.take("error")).error, /Solo tenés 0 Charizard/);
+    c.send({ type: "ping" });
+    await c.take("pong");
+    c.close();
   });
 });

@@ -32,6 +32,7 @@ const freePort = (): Promise<number> =>
 
 interface Srv {
   port: number;
+  pid: number;
   env: NodeJS.ProcessEnv;
   stdout: () => string;
   invite(...args: string[]): string;
@@ -81,7 +82,7 @@ async function startServer(extra: Record<string, string | undefined> = {}, opts:
     await new Promise((r) => setTimeout(r, 100));
   }
   return {
-    port, env, invite, cli,
+    port, pid: child.pid!, env, invite, cli,
     stdout: () => out + err,
     async stop() {
       if (child.exitCode === null) {
@@ -368,6 +369,206 @@ describe("DB existente (esquema del hito 1): migración idempotente y coleccione
       const port2 = await freePort();
       const r = spawnSync(process.execPath, ["--no-warnings", "server/main.ts", "invite", "list"], { cwd: ROOT, env: { ...s.env, GAME_PORT: String(port2) }, encoding: "utf8" });
       assert.equal(r.status, 0, r.stderr);
+    } finally { await s.stop(); }
+  });
+});
+
+// ================================================================== endurecimiento (auditoría de seguridad)
+/** Memoria residente (MB) de un proceso. */
+function rssMb(pid: number): number {
+  if (process.platform === "win32") {
+    const r = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+    const m = /"([\d.,\s ]+)\s*KB?"\s*$/m.exec(r.stdout);
+    assert.ok(m, r.stdout);
+    return Number(m[1].replace(/\D/g, "")) / 1024;
+  }
+  const r = spawnSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
+  return Number(r.stdout.trim()) / 1024;
+}
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe("M2: estáticos en streaming, topes de conexiones y límites", () => {
+  it("80 sockets que piden /vendor/typescript.js (9 MB) y no leen: la memoria del servidor no crece proporcionalmente", { timeout: 60000 }, async () => {
+    const s = await startServer();
+    try {
+      const warm = await req(s.port, "GET", "/vendor/typescript.js");
+      assert.equal(warm.status, 200);
+      assert.ok(warm.text.length > 5_000_000, "el archivo grande tiene que estar");
+      await sleepMs(500);
+      const before = rssMb(s.pid);
+      const socks: net.Socket[] = [];
+      for (let i = 0; i < 80; i++) {
+        const sock = net.connect(s.port, "127.0.0.1");
+        sock.on("error", () => { /* se destruye al final */ });
+        sock.write(`GET /vendor/typescript.js HTTP/1.1\r\nHost: 127.0.0.1:${s.port}\r\n\r\n`);
+        sock.pause(); // no lee
+        socks.push(sock);
+      }
+      await sleepMs(2500);
+      const after = rssMb(s.pid);
+      for (const k of socks) k.destroy();
+      // con readFile serían ~80 x 9 MB = 720 MB; en streaming cada socket retiene unos cientos de KB
+      assert.ok(after - before < 150, `la memoria creció ${(after - before).toFixed(0)} MB (de ${before.toFixed(0)} a ${after.toFixed(0)})`);
+      assert.equal((await req(s.port, "GET", "/")).status, 200, "sigue sirviendo");
+    } finally { await s.stop(); }
+  });
+
+  it("el archivo grande sale completo, con ETag y 304 (el streaming mantiene las cabeceras)", async () => {
+    const s = await startServer();
+    try {
+      const a = await new Promise<http.IncomingMessage & { len: number }>((resolve, reject) => {
+        http.get({ hostname: "127.0.0.1", port: s.port, path: "/vendor/typescript.js", agent: false }, (res) => {
+          let len = 0;
+          res.on("data", (c) => { len += c.length; });
+          res.on("end", () => resolve(Object.assign(res, { len })));
+        }).on("error", reject);
+      });
+      assert.equal(a.statusCode, 200);
+      assert.equal(a.len, Number(a.headers["content-length"]));
+      assert.match(String(a.headers["cache-control"]), /max-age/);
+      const etag = String(a.headers.etag);
+      assert.ok(etag);
+      const b = await req(s.port, "GET", "/vendor/typescript.js", { headers: { "If-None-Match": etag } });
+      assert.equal(b.status, 304);
+      const h = await req(s.port, "HEAD", "/vendor/typescript.js");
+      assert.equal(h.status, 200);
+      assert.equal(h.text, "");
+    } finally { await s.stop(); }
+  });
+
+  it("tope de conexiones simultáneas por IP de socket (MAX_CONNS_LOOPBACK): las de más se cierran y el servidor sigue", async () => {
+    const s = await startServer({ MAX_CONNS_LOOPBACK: "5" });
+    try {
+      let closed = 0;
+      const socks: net.Socket[] = [];
+      for (let i = 0; i < 12; i++) {
+        const sock = net.connect(s.port, "127.0.0.1");
+        sock.on("error", () => { /* reset */ });
+        sock.on("close", () => { closed++; });
+        socks.push(sock);
+      }
+      await sleepMs(800);
+      assert.ok(closed >= 7, `se cerraron ${closed} de 12`);
+      for (const k of socks) k.destroy();
+      await sleepMs(200);
+      assert.equal((await req(s.port, "GET", "/")).status, 200);
+      assert.match(s.stdout(), /conexión rechazada: demasiadas simultáneas/);
+    } finally { await s.stop(); }
+  });
+
+  it("los estáticos y las rutas desconocidas también tienen límite por IP (RATE_STATIC_PER_MIN); un POST a una ruta desconocida no lee el cuerpo", async () => {
+    const s = await startServer({ RATE_STATIC_PER_MIN: "6" });
+    try {
+      const codes: number[] = [];
+      for (let i = 0; i < 8; i++) codes.push((await req(s.port, "GET", "/")).status);
+      assert.deepEqual(codes, [200, 200, 200, 200, 200, 200, 429, 429]);
+      assert.match(s.stdout(), /429 límite de pedidos/);
+    } finally { await s.stop(); }
+    const t = await startServer();
+    try {
+      const r = await req(t.port, "POST", "/otra/cosa", { body: { x: "y".repeat(1000) } });
+      assert.equal(r.status, 404);
+    } finally { await t.stop(); }
+  });
+});
+
+describe("M4: presupuesto de fallos de invitación por IP, con tope global como último recurso", () => {
+  it("una IP que falla se bloquea sola; otra IP con un código válido entra", async () => {
+    const s = await startServer({ TRUST_PROXY: "1", SIGNUP_FAILS_PER_HOUR: "3", RATE_SIGNUP_PER_MIN: "100000", RATE_API_PER_MIN: "100000" });
+    try {
+      const code = s.invite("--uses", "20");
+      const atacante = { "X-Forwarded-For": "6.6.6.6" };
+      for (let i = 0; i < 3; i++) assert.equal((await signup(s, "AAAA-BBBB", atacante)).status, 403);
+      assert.equal((await signup(s, "AAAA-BBBB", atacante)).status, 429);
+      assert.equal((await signup(s, code, atacante)).status, 429, "esa IP quedó bloqueada");
+      assert.equal((await signup(s, code, { "X-Forwarded-For": "7.7.7.7" })).status, 201, "otra IP no se ve afectada");
+    } finally { await s.stop(); }
+  });
+
+  it("tope global agotado: se loguea, los inválidos se frenan con 429, pero un código válido nunca se bloquea", { timeout: 30000 }, async () => {
+    const s = await startServer({ TRUST_PROXY: "1", SIGNUP_FAILS_PER_HOUR: "100", SIGNUP_FAILS_GLOBAL_PER_HOUR: "4", RATE_SIGNUP_PER_MIN: "100000", RATE_API_PER_MIN: "100000" });
+    try {
+      const code = s.invite("--uses", "20");
+      const seen: number[] = [];
+      for (let i = 0; i < 6; i++) seen.push((await signup(s, "AAAA-BBBB", { "X-Forwarded-For": `10.0.0.${i}` })).status);
+      assert.deepEqual(seen.slice(0, 3), [403, 403, 403]);
+      assert.equal(seen[5], 429, "con el global agotado los inválidos reciben 429");
+      assert.match(s.stdout(), /tope global de intentos de alta fallidos/);
+      const ok = await signup(s, code, { "X-Forwarded-For": "11.0.0.1" });
+      assert.equal(ok.status, 201, "un código válido pasa aunque el global esté agotado");
+      assert.ok(!s.stdout().includes(code), "el log no debe tener códigos de invitación");
+    } finally { await s.stop(); }
+  });
+});
+
+describe("B3/B6/B9: Host estricto, cabeceras de seguridad y logs sin secretos", () => {
+  it("Host con userinfo, puerto ajeno o caracteres raros: 403; el normal sigue andando", async () => {
+    const s = await startServer();
+    try {
+      for (const h of [`localhost:${s.port}@evil.com`, `evil.com@localhost:${s.port}`, "localhost:1", `localhost:${s.port} evil.com`, `127.0.0.1:${s.port}/x`]) {
+        assert.equal((await req(s.port, "GET", "/", { headers: { Host: h } })).status, 403, h);
+      }
+      assert.equal((await req(s.port, "GET", "/", { headers: { Host: `localhost:${s.port}` } })).status, 200);
+      assert.match(s.stdout(), /403 Host no permitido/);
+    } finally { await s.stop(); }
+  });
+
+  it("Origin: localhost solo con el puerto del juego (y bind en loopback)", async () => {
+    const s = await startServer();
+    try {
+      const code = s.invite("--uses", "5");
+      assert.equal((await signup(s, code, { Origin: `http://localhost:${s.port}` })).status, 201);
+      assert.equal((await signup(s, code, { Origin: "http://localhost:5173" })).status, 403);
+      assert.equal((await signup(s, code, { Origin: "http://localhost" })).status, 403);
+    } finally { await s.stop(); }
+  });
+
+  it("cabeceras: X-Frame-Options, Referrer-Policy, nosniff y CSP en index.html", async () => {
+    const s = await startServer();
+    try {
+      const get = (p: string) => new Promise<http.IncomingHttpHeaders>((resolve, reject) => {
+        http.get({ hostname: "127.0.0.1", port: s.port, path: p, agent: false }, (res) => { res.resume(); res.on("end", () => resolve(res.headers)); }).on("error", reject);
+      });
+      for (const p of ["/", "/api/me", "/data/catalog.json", "/src/cards.ts"]) {
+        const h = await get(p);
+        assert.equal(h["x-frame-options"], "DENY", p);
+        assert.equal(h["referrer-policy"], "no-referrer", p);
+        assert.equal(h["x-content-type-options"], "nosniff", p);
+      }
+      const csp = String((await get("/"))["content-security-policy"]);
+      for (const d of ["frame-ancestors 'none'", "base-uri 'self'", "object-src 'none'", "form-action 'self'", "connect-src 'self' ws: wss:", "default-src 'self'"]) {
+        assert.ok(csp.includes(d), `CSP sin ${d}: ${csp}`);
+      }
+      assert.ok(!csp.includes("unsafe-eval"), "no hace falta 'unsafe-eval'");
+    } finally { await s.stop(); }
+  });
+
+  it("DEBUG_HEADERS=1 imprime solo la cadena de IP; sin esa variable no imprime nada", async () => {
+    const s = await startServer({ DEBUG_HEADERS: "1", TRUST_PROXY: "1" });
+    try {
+      await req(s.port, "GET", "/", { headers: { "X-Forwarded-For": "8.8.8.8, 9.9.9.9", Cookie: "secreto=1", "X-Player-Token": "TOKENSECRETO" } });
+      const out = s.stdout();
+      assert.match(out, /\[debug-ip\] socket=\S+ x-forwarded-for=\[8\.8\.8\.8, 9\.9\.9\.9\] usada=9\.9\.9\.9 trust_proxy=1/);
+      assert.ok(!out.includes("secreto") && !out.includes("TOKENSECRETO"));
+    } finally { await s.stop(); }
+    const t = await startServer();
+    try {
+      await req(t.port, "GET", "/");
+      assert.ok(!t.stdout().includes("debug-ip"));
+    } finally { await t.stop(); }
+  });
+
+  it("el alta queda en el log con el id y la IP, sin el token ni el código", async () => {
+    const s = await startServer();
+    try {
+      const code = s.invite();
+      const r = await signup(s, code);
+      assert.equal(r.status, 201);
+      assert.match(s.stdout(), new RegExp(`alta jugador=${r.json.id} ip=`));
+      assert.ok(!s.stdout().includes(r.json.token) && !s.stdout().includes(code));
+      await signup(s, "AAAA-BBBB");
+      assert.match(s.stdout(), /invitación inválida o agotada ip=/);
+      assert.ok(!s.stdout().includes("AAAA-BBBB"));
     } finally { await s.stop(); }
   });
 });

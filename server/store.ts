@@ -11,7 +11,7 @@
 // busy_timeout cubren a otro proceso que abra la misma base (p. ej. tools/backup_db.py o el servidor Python).
 
 import { DatabaseSync } from "node:sqlite";
-import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { ValueError, cut, isObj, setOwn } from "./util.ts";
@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS matches (
   reason      TEXT,
   reward      TEXT
 );
+CREATE TABLE IF NOT EXISTS config (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS admin_tokens (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   token_hash  TEXT NOT NULL UNIQUE,
@@ -76,12 +80,31 @@ export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
+/** Cuánto espera SQLite a otro escritor antes de fallar (la espera bloquea el proceso entero: se mantiene corta). */
+const BUSY_MS = 2000;
+
+/**
+ * Nombre de jugador saneado: sin controles, sin caracteres invisibles ni de dirección de texto (spoofing),
+ * con los espacios normalizados, y como mucho 24 caracteres.
+ */
+export function cleanName(name: unknown): string {
+  const s = typeof name === "string" ? name : "";
+  return cut(
+    s.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u00ad]/g, "")
+      .replace(/[\s\u00a0\u2028\u2029]+/g, " ").trim(),
+    24,
+  );
+}
+/** Clave para comparar nombres sin importar mayúsculas ni formas Unicode equivalentes. */
+const nameKey = (n: string): string => n.normalize("NFKC").toLowerCase();
+
 /** Código de invitación en forma canónica (mayúsculas, sin guiones ni espacios). */
 export function normalizeInvite(code: unknown): string {
   return typeof code === "string" ? code.toUpperCase().replace(/[\s-]/g, "") : "";
 }
 const INVITE_RE = /^[A-HJ-NP-Z2-9]{8}$/;
-export const inviteHash = (code: unknown): string => hashToken(normalizeInvite(code));
+/** Hash VIEJO de las invitaciones (sha256 sin clave): solo para aceptar filas anteriores y migrarlas. */
+export const legacyInviteHash = (code: unknown): string => hashToken(normalizeInvite(code));
 
 /** La invitación no existe, venció, se agotó o fue revocada. */
 export class InviteError extends Error {}
@@ -128,11 +151,26 @@ export class Store {
   constructor(file: string) {
     this.path = path.resolve(file);
     mkdirSync(path.dirname(this.path), { recursive: true });
-    this.db = new DatabaseSync(this.path, { timeout: 15000 });
-    this.db.exec("PRAGMA busy_timeout=15000");
+    this.db = new DatabaseSync(this.path, { timeout: BUSY_MS });
+    this.db.exec(`PRAGMA busy_timeout=${BUSY_MS}`);
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec("PRAGMA foreign_keys=ON");
     this.db.exec(SCHEMA);
+    this.inviteKey = this.loadInviteKey();
+  }
+
+  /** Clave secreta del servidor para el HMAC de las invitaciones (se crea una vez y queda en la tabla config). */
+  private inviteKey: Buffer;
+  private loadInviteKey(): Buffer {
+    const row = this.get("SELECT value FROM config WHERE key='invite_hmac_key'");
+    if (row && /^[0-9a-f]{64}$/.test(String(row.value))) return Buffer.from(String(row.value), "hex");
+    const hex = randomBytes(32).toString("hex");
+    this.db.prepare("INSERT OR IGNORE INTO config (key, value) VALUES ('invite_hmac_key', ?)").run(hex);
+    return Buffer.from(String(this.get("SELECT value FROM config WHERE key='invite_hmac_key'")!.value), "hex");
+  }
+  /** Hash de una invitación: HMAC-SHA256 con la clave del servidor (una base filtrada no deja adivinar códigos offline). */
+  inviteHash(code: unknown): string {
+    return createHmac("sha256", this.inviteKey).update(normalizeInvite(code), "utf8").digest("hex");
   }
 
   // ------------------------------------------------------------ helpers
@@ -184,11 +222,19 @@ export class Store {
   createPlayer(name: string | undefined, inviteCode: unknown, maxPlayers: number): [Record<string, any>, string] {
     const token = randomBytes(24).toString("base64url");
     const t = now();
-    const clean = (name ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+    const clean = cleanName(name);
     return this.tx(() => {
-      const inv = INVITE_RE.test(normalizeInvite(inviteCode))
-        ? this.get("SELECT * FROM invites WHERE code_hash=?", inviteHash(inviteCode))
-        : undefined;
+      let inv: Row | undefined;
+      if (INVITE_RE.test(normalizeInvite(inviteCode))) {
+        inv = this.get("SELECT * FROM invites WHERE code_hash=?", this.inviteHash(inviteCode));
+        if (!inv) { // fila anterior al HMAC: se acepta y se migra al hash nuevo (idempotente)
+          inv = this.get("SELECT * FROM invites WHERE code_hash=?", legacyInviteHash(inviteCode));
+          if (inv) {
+            this.run("UPDATE invites SET code_hash=? WHERE code_hash=?", this.inviteHash(inviteCode), inv.code_hash);
+            inv = { ...inv, code_hash: this.inviteHash(inviteCode) };
+          }
+        }
+      }
       if (!inv || inv.uses_left <= 0 || (inv.expires !== null && inv.expires <= t)) throw new InviteError("Código de invitación inválido o usado.");
       const n = Number(this.get("SELECT COUNT(*) AS n FROM players")!.n);
       if (n >= maxPlayers) throw new PlayersFull("El servidor está lleno.");
@@ -201,11 +247,22 @@ export class Store {
       }
       this.run(
         "INSERT INTO players (id, token_hash, name, created, last_seen, save) VALUES (?,?,?,?,?,?)",
-        pid, hashToken(token), cut(clean || `Jugador ${n + 1}`, 24), t, t, JSON.stringify({ collection: {} }),
+        pid, hashToken(token), this.uniqueName(clean || `Jugador ${n + 1}`), t, t, JSON.stringify({ collection: {} }),
       );
       const row = this.get("SELECT * FROM players WHERE id=?", pid)!;
       return [this.player(row), token] as [Record<string, any>, string];
     });
+  }
+
+  /** Nombre libre: si ya lo usa otro jugador (sin distinguir mayúsculas) se le suma un número (" 2", " 3"...). Dentro de una tx. */
+  private uniqueName(base: string, exceptId?: string): string {
+    const used = new Set(this.all("SELECT id, name FROM players").filter((r) => r.id !== exceptId).map((r) => nameKey(String(r.name))));
+    if (!used.has(nameKey(base))) return base;
+    for (let i = 2; ; i++) {
+      const suffix = ` ${i}`;
+      const cand = cut(base, 24 - suffix.length).trimEnd() + suffix;
+      if (!used.has(nameKey(cand))) return cand;
+    }
   }
 
   // ------------------------------------------------------------ invitaciones (solo CLI)
@@ -216,7 +273,7 @@ export class Store {
     const t = now();
     this.tx(() => this.run(
       "INSERT INTO invites (code_hash, label, uses_left, expires, created) VALUES (?,?,?,?,?)",
-      inviteHash(a), cut(label, 40), uses, t + days * 86400, t,
+      this.inviteHash(a), cut(label, 40), uses, t + days * 86400, t,
     ));
     return `${a.slice(0, 4)}-${a.slice(4)}`;
   }
@@ -228,7 +285,8 @@ export class Store {
   /** Revoca por código completo o por el id (8 hex) que muestra `invite list`. */
   revokeInvite(codeOrId: string): boolean {
     return this.tx(() => {
-      let n = this.run("DELETE FROM invites WHERE code_hash=?", inviteHash(codeOrId)).changes;
+      let n = this.run("DELETE FROM invites WHERE code_hash=?", this.inviteHash(codeOrId)).changes;
+      if (n === 0) n = this.run("DELETE FROM invites WHERE code_hash=?", legacyInviteHash(codeOrId)).changes;
       if (n === 0 && /^[0-9a-f]{8}$/.test(codeOrId)) n = this.run("DELETE FROM invites WHERE substr(code_hash,1,8)=?", codeOrId).changes;
       return n > 0;
     });
@@ -270,9 +328,14 @@ export class Store {
   }
 
   renamePlayer(pid: string, name: string): Record<string, any> | null {
-    name = cut((name || "").trim(), 24);
+    name = cleanName(name);
     if (!name) throw new ValueError("El nombre no puede estar vacío.");
-    const changed = this.tx(() => this.run("UPDATE players SET name=? WHERE id=?", name, pid).changes);
+    const changed = this.tx(() => {
+      if (!this.get("SELECT 1 FROM players WHERE id=?", pid)) return 0;
+      const dup = this.all("SELECT id, name FROM players").some((r) => r.id !== pid && nameKey(String(r.name)) === nameKey(name));
+      if (dup) throw new ValueError("Ya hay un jugador con ese nombre.");
+      return this.run("UPDATE players SET name=? WHERE id=?", name, pid).changes;
+    });
     if (changed === 0) return null;
     return this.getPlayer(pid);
   }
@@ -388,17 +451,29 @@ export class Store {
     ));
   }
 
-  /** Guarda el log de intenciones (para depurar o reproducir). */
-  matchIntents(id: string, intents: unknown): void {
-    this.tx(() => this.run("UPDATE matches SET intents=? WHERE id=? AND ended IS NULL", JSON.stringify(intents), id));
+  /** SQL que agrega entradas al final del arreglo JSON `intents` sin reescribirlo entero desde JS. */
+  private static APPEND_INTENTS = `intents = CASE WHEN intents='[]' THEN ?1 ELSE substr(intents, 1, length(intents) - 1) || ',' || ?2 || ']' END`;
+
+  /** Agrega entradas nuevas al log de intenciones (para depurar o reproducir): solo las NUEVAS, no todo el log. */
+  matchIntents(id: string, newEntries: unknown[]): void {
+    if (!newEntries.length) return;
+    const arr = JSON.stringify(newEntries);
+    this.tx(() => this.run(`UPDATE matches SET ${Store.APPEND_INTENTS} WHERE id=?3 AND ended IS NULL`, arr, arr.slice(1, -1), id));
   }
 
-  /** Cierra una partida. winner: 0/1 (asiento), 2 empate, null anulada. */
-  matchEnd(id: string, winner: number | null, reason: string, reward: unknown, intents: unknown): void {
-    this.tx(() => this.run(
-      "UPDATE matches SET ended=?, winner=?, reason=?, reward=?, intents=? WHERE id=?",
-      now(), winner, reason, reward === null ? null : JSON.stringify(reward), JSON.stringify(intents), id,
-    ));
+  /** Cierra una partida (y agrega las entradas que faltaban del log). winner: 0/1 (asiento), 2 empate, null anulada. */
+  matchEnd(id: string, winner: number | null, reason: string, reward: unknown, newEntries: unknown[] = []): void {
+    const arr = JSON.stringify(newEntries);
+    const rw = reward === null ? null : JSON.stringify(reward);
+    this.tx(() => newEntries.length
+      ? this.run(`UPDATE matches SET ended=?4, winner=?5, reason=?6, reward=?7, ${Store.APPEND_INTENTS} WHERE id=?3`,
+        arr, arr.slice(1, -1), id, now(), winner, reason, rw)
+      : this.run("UPDATE matches SET ended=?, winner=?, reason=?, reward=? WHERE id=?", now(), winner, reason, rw, id));
+  }
+
+  /** Borra las partidas terminadas hace más de `days` días (el log de intents es para depurar, no historial). Devuelve cuántas. */
+  pruneMatches(days: number): number {
+    return this.tx(() => this.run("DELETE FROM matches WHERE ended IS NOT NULL AND ended < ?", now() - days * 86400).changes);
   }
 
   /** Al arrancar: las partidas que quedaron abiertas (reinicio del servidor) se anulan sin resultado. Devuelve cuántas. */
