@@ -174,9 +174,10 @@ function chooseEnergy(s: Slot, title: string, done: (i: number) => void, back: (
   openChooser({ title, items: energyItems(s), min: 1, max, onDone: (sel) => done(sel[0]), onCancel: back });
 }
 
-function finishFlow(err: string | null): void {
-  CHOOSER = null;
-  afterAction(err);
+/** Cierra lo que haya abierto y manda la intención del flujo (el error, si lo hay, llega por onError). */
+function finishFlow(it: Intent): void {
+  BT.peekLocked = false;
+  act(it);
 }
 
 // ---------------------------------------------------------------------
@@ -200,7 +201,7 @@ function chooseSlotPrompt(steps: Step[], i: number, name: string): string {
   }
 }
 
-function trainerFlow(hi: number): void {
+function trainerFlow(hi: number, peeked?: PeekInfo[]): void {
   const b = BT.b!;
   const p = b.p[HUMAN];
   const o = b.p[RIVAL];
@@ -210,19 +211,30 @@ function trainerFlow(hi: number): void {
   const picks: Record<number, TPick> = {};
   const used = new Set<CI>([card]); // cartas de la mano ya elegidas en pasos anteriores
   let chosen: Slot | null = null;
-  const cancel = () => {
-    CHOOSER = null;
-    BT.pick = null;
-    actionHand();
+  // Después de mirar el mazo (peek) el motor ya no acepta otra cosa que jugar este Entrenador: no se puede cancelar.
+  BT.peekLocked = !!peeked;
+  const cancel = peeked
+    ? undefined
+    : () => {
+        CHOOSER = null;
+        BT.pick = null;
+        actionHand();
+      };
+  // las cartas del mazo vienen del motor (el cliente no las conoce): una entrada por paso que busca u ordena, en orden
+  const peekQueue = (peeked ?? []).map((x) => ({ mode: x.mode, cards: x.cards.map(hydrateCard) }));
+  const takePeek = (mode: "search" | "top"): CI[] => {
+    const i = peekQueue.findIndex((x) => x.mode === mode);
+    return i >= 0 ? peekQueue.splice(i, 1)[0].cards : [];
   };
   const choose = (title: string, items: CI[], min: number, max: number, done: (sel: CI[]) => void, ordered = false) =>
     openChooser({ title, items: cardItems(items), min, max, ordered, onCancel: cancel, onDone: (sel) => done(sel.map((k) => items[k])) });
-  const byNumber = (list: CI[]) => [...list].sort((a, c) => a.c.number - c.c.number);
 
   const next = (i: number): void => {
     if (i >= steps.length) {
       CHOOSER = null;
-      return finishFlow(playTrainer(b, HUMAN, hi, { picks }));
+      const out: Record<number, PickIntent> = {};
+      for (const [k, pk] of Object.entries(picks)) out[Number(k)] = pickToIntent(pk);
+      return finishFlow({ t: "playTrainer", card: card.uid, choice: { picks: out } });
     }
     const st = steps[i];
     const go = (pk?: TPick) => {
@@ -291,7 +303,8 @@ function trainerFlow(hi: number): void {
         });
       }
       case "searchDeck": {
-        const items = byNumber(p.deck.filter((c) => !used.has(c) && matchFilter(c.c, st.filter)));
+        const items = takePeek("search"); // ya vienen filtradas y ordenadas por número
+        if (!items.length) return go();
         const k = Math.min(n, items.length);
         return choose(`${name}: elegí ${k === 1 ? "la" : k} ${filterEs(st.filter, k)} que buscás en tu mazo.`, items, k, k, (sel) => go({ cards: sel }));
       }
@@ -308,11 +321,12 @@ function trainerFlow(hi: number): void {
         );
       }
       case "arrangeTop": {
-        const k = Math.min(Math.max(1, Number(st.count) || 5), p.deck.length);
+        const top = takePeek("top");
+        const k = top.length;
         if (k <= 1) return go();
         return openChooser({
           title: `${name}: tocá las ${k} cartas en el orden en que querés que queden (la 1 queda arriba de todo).`,
-          items: cardItems(p.deck.slice(0, k)), min: k, max: k, ordered: true, onCancel: cancel,
+          items: cardItems(top), min: k, max: k, ordered: true, onCancel: cancel,
           onDone: (sel) => go({ order: sel }),
         });
       }
@@ -346,7 +360,7 @@ function actionPowers(): void {
   openChooser({
     title: "PODERES: elegí qué querés usar (se pueden usar las veces que quieras antes de atacar).",
     items, min: 1, max: 1, onCancel: back,
-    onDone: ([k]) => (k < powers.length ? powerFlow(powers[k]) : finishFlow(discardDoll(b, HUMAN, dolls[k - powers.length]))),
+    onDone: ([k]) => (k < powers.length ? powerFlow(powers[k]) : finishFlow({ t: "discardDoll", slot: dolls[k - powers.length].uid })),
   });
 }
 
@@ -361,7 +375,7 @@ function powerFlow(s: Slot): void {
     closePick();
   };
   const next = (i: number, ch: PowerChoice): void => {
-    if (i >= steps.length) return finishFlow(usePower(b, HUMAN, s, ch));
+    if (i >= steps.length) return finishFlow({ t: "usePower", slot: s.uid, choice: powerChoiceToIntent(ch) });
     const st = steps[i];
     const mine = inPlay(p);
     const go = (extra: PowerChoice) => next(i + 1, { ...ch, ...extra });
@@ -443,10 +457,17 @@ function attackFlow(idx: number, target?: Slot): void {
   const atk = topCard(a).attacks[idx];
   const has = (op: string) => stepsHave(atk.effect, op);
   const go = (choice: AttackChoice = {}) => {
+    const ch: AttackIntentChoice = {};
+    if (choice.attackIdx !== undefined) ch.attackIdx = choice.attackIdx;
+    if (choice.type) ch.type = choice.type;
+    if (choice.energy !== undefined) ch.energy = d.energy[choice.energy].uid; // la UI elige por índice; el motor, por uid
+    const it: Intent = { t: "attack", idx };
+    if (target) it.target = target.uid;
+    if (Object.keys(ch).length) it.choice = ch;
     CHOOSER = null;
     BT.pick = null;
     BT.mode = "idle";
-    attack(b, HUMAN, idx, target, choice);
+    bsend(it);
   };
   const back = () => {
     CHOOSER = null;
@@ -508,7 +529,7 @@ function retreatFlow(benchIdx: number): void {
   const units = (sel: number[]) => sel.reduce((n, i) => n + ciEnergyUnits(a.energy[i]), 0);
   const allSame = new Set(a.energy.map((e) => `${ciEnergyType(e)}:${ciEnergyUnits(e)}`)).size <= 1;
   if (cost === 0 || allSame || units(a.energy.map((_, i) => i)) === cost) {
-    return finishFlow(retreat(b, HUMAN, benchIdx));
+    return finishFlow({ t: "retreat", bench: b.p[HUMAN].bench[benchIdx].uid });
   }
   openChooser({
     title: `Retirada: elegí qué Energías descartar (costo ${cost}).`,
@@ -518,6 +539,6 @@ function retreatFlow(benchIdx: number): void {
       CHOOSER = null;
       closePick();
     },
-    onDone: (sel) => finishFlow(retreat(b, HUMAN, benchIdx, sel)),
+    onDone: (sel) => finishFlow({ t: "retreat", bench: b.p[HUMAN].bench[benchIdx].uid, energies: sel.map((i) => a.energy[i].uid) }),
   });
 }

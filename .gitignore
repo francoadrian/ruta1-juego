@@ -4,3 +4,4 @@ data/game.db
 data/game.db-*
 .env
 
+node_modules/

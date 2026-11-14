@@ -115,7 +115,7 @@
   <script>
   (() => {
     // Orden de carga (ADR 0002 3.1): núcleo sin DOM (cartas → rng → motor → IA → sobres) → jugador/red (DOM) → arte → mapa → menú → combate → sobres → buzón → táctil → arranque
-    const FILES = ["src/baseset.ts", "src/cards.ts", "src/rng.ts", "src/tcg.ts", "src/ai.ts", "src/packs.ts", "src/match.ts", "src/player.ts", "src/net.ts",
+    const FILES = ["src/baseset.ts", "src/cards.ts", "src/rng.ts", "src/tcg.ts", "src/ai.ts", "src/packs.ts", "src/match.ts", "src/player.ts", "src/driver.ts", "src/net.ts",
       "src/art.ts", "src/game.ts", "src/menu.ts", "src/decks.ts", "src/battle.ts", "src/choices.ts", "src/booster.ts", "src/mail.ts", "src/touch.ts", "src/main.ts"];
     const getJson = (url) => fetch(url, { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 

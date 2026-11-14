@@ -16,7 +16,7 @@ interface Target {
   hand?: number;
 }
 
-interface Pick {
+interface BtPick {
   prompt: string;
   targets: Target[];
   cursor: number;
@@ -29,13 +29,24 @@ const HUMAN = 0;
 const RIVAL = 1;
 
 const BT = {
-  b: null as Battle | null,
+  /** Se miró el mazo para un Entrenador: ya no se puede cancelar, hay que jugarlo. */
+  peekLocked: false,
+  b: null as ViewBattle | null,
+  /** Con quién se habla: el motor local o el servidor (ver driver.ts). La UI no sabe cuál. */
+  driver: null as BattleDriver | null,
+  /** Se mandó una intención y todavía no volvió ni el estado ni un error. */
+  waiting: false,
+  /** Se mandó "peek" y falta el mensaje con las cartas del mazo. */
+  peekPending: false,
+  /** Log que va juntando la UI (las últimas 80 líneas). */
+  log: [] as string[],
+  /** Cómo terminó (solo si lo informa el servidor). */
+  result: null as MatchResult | null,
   mode: "menu" as "menu" | "attack" | "pick" | "idle",
   menuCursor: 0,
   attackCursor: 0,
-  pick: null as Pick | null,
+  pick: null as BtPick | null,
   zoom: null as Card | null,
-  aiTimer: 0,
   banner: "",
   bannerT: 0,
   toast: "",
@@ -92,25 +103,87 @@ const rivalName = (): string => BT.b?.p[RIVAL].name ?? game.opponent?.def.name ?
 function startBattle(prizes = PRIZES): void {
   game.mode = "battle";
   const opp = game.opponent;
-  BT.b = newBattle([mainDeck(), npcDeck(opp)], [playerName(), opp?.def.name ?? "RIVAL"], {
-    rng: sfc32(randomSeed()), // modo local: semilla propia del cliente
-    prizes,
-    ai: [false, true],
-  });
+  // Modo local (offline): el motor corre en el cliente con una semilla propia. El paso 9 va a elegir el
+  // driver remoto cuando haya servidor: la UI de abajo no cambia.
+  const driver = createLocalDriver([mainDeck(), npcDeck(opp)], [playerName(), opp?.def.name ?? "RIVAL"], { prizes });
+  BT.driver = driver;
+  BT.b = null;
+  BT.log = [];
+  BT.result = null;
+  BT.waiting = false;
+  BT.peekPending = false;
   BT.mode = "idle";
   BT.pick = null;
   BT.zoom = null;
   BT.lastTurn = -1;
-  aiSetup(BT.b, RIVAL);
+  CHOOSER = null;
+  driver.handlers = battleHandlers();
+  driver.begin();
   showBanner(`¡${rivalName()} te desafía!`);
-  pickSetupActive();
 }
 
 function exitBattle(): void {
   const b = BT.b!;
+  BT.driver?.close();
+  BT.driver = null;
   BT.b = null;
   game.mode = "explore";
   finishNpcBattle(b.winner === HUMAN ? "win" : b.winner === 2 ? "draw" : "lose");
+}
+
+/** Qué hace la UI con lo que contesta el driver. */
+function battleHandlers(): BattleHandlers {
+  return {
+    onState(view, lines) {
+      const hadPick = BT.mode === "pick" && BT.pick?.tag !== "promote";
+      BT.b = hydrateView(view);
+      for (const l of lines) BT.log.push(l);
+      if (BT.log.length > 80) BT.log.splice(0, BT.log.length - 80);
+      if (!BT.peekPending) BT.waiting = false;
+      const b = BT.b;
+      // si el estado cambió por otro lado (el rival, el tiempo, un resume) y había una elección a medias, ya no vale
+      if (hadPick && !BT.peekLocked && (b.cur !== HUMAN || b.phase !== "turn") && b.phase !== "setup") {
+        BT.pick = null;
+        CHOOSER = null;
+      }
+      if (b.phase === "over") {
+        BT.pick = null;
+        CHOOSER = null;
+        BT.peekLocked = false;
+      } else if (b.phase === "setup") syncSetup();
+    },
+    onError(msg) {
+      BT.waiting = false;
+      BT.peekPending = false;
+      toast(msg);
+      if (BT.b?.phase === "setup") syncSetup();
+    },
+    onPeek(info) {
+      BT.peekPending = false;
+      BT.waiting = false;
+      const b = BT.b;
+      const uid = info[0]?.card;
+      const hi = b ? b.p[HUMAN].hand.findIndex((c) => c.uid === uid) : -1;
+      if (hi >= 0) trainerFlow(hi, info);
+    },
+    onOver(res) {
+      BT.result = res;
+    },
+  };
+}
+
+/** Manda una intención y espera la respuesta (la UI no hace nada hasta que llega onState u onError). */
+function bsend(it: Intent): void {
+  BT.waiting = true;
+  if (it.t === "peek") BT.peekPending = true;
+  BT.driver!.send(it);
+}
+
+/** Cierra lo que haya abierto y manda la intención. Si el motor la rechaza, onError muestra el motivo. */
+function act(it: Intent): void {
+  CHOOSER = null;
+  closePick();
+  bsend(it);
 }
 
 function showBanner(text: string): void {
@@ -132,14 +205,26 @@ function basicsInHand(): number[] {
   return BT.b!.p[HUMAN].hand.map((c, i) => (isBasic(c.c) ? i : -1)).filter((i) => i >= 0);
 }
 
+/** Según lo que ya hay en la mesa, pide el Activo, la Banca o espera al rival. Se llama con cada estado de la preparación. */
+function syncSetup(): void {
+  const b = BT.b!;
+  BT.pick = null;
+  BT.mode = "idle";
+  if (b.setupDone?.[0]) return; // ya terminé: espero al rival
+  if (!b.p[HUMAN].active) return pickSetupActive();
+  pickSetupBench();
+}
+
 function pickSetupActive(): void {
   openPick({
     prompt: "Elegí tu Pokémon Activo.",
     targets: handTargets(basicsInHand()),
     onPick: (t) => {
-      setupActive(BT.b!, HUMAN, t.hand!);
-      pickSetupBench();
+      const uid = BT.b!.p[HUMAN].hand[t.hand!].uid;
+      BT.pick = null;
+      bsend({ t: "setupActive", card: uid });
     },
+    tag: "setup",
   });
 }
 
@@ -151,23 +236,25 @@ function pickSetupBench(): void {
     prompt: "Elegí Pokémon para tu Banca. X: listo.",
     targets: handTargets(basics),
     onPick: (t) => {
-      setupBench(b, HUMAN, t.hand!);
-      pickSetupBench();
+      const uid = b.p[HUMAN].hand[t.hand!].uid;
+      BT.pick = null;
+      bsend({ t: "setupBench", card: uid });
     },
     onCancel: finishHumanSetup,
+    tag: "setup",
   });
 }
 
 function finishHumanSetup(): void {
   BT.pick = null;
   BT.mode = "idle";
-  finishSetup(BT.b!);
+  bsend({ t: "setupDone" });
 }
 
 // ---------------------------------------------------------------------
 //  Selección genérica de objetivos
 // ---------------------------------------------------------------------
-function openPick(p: Omit<Pick, "cursor">): void {
+function openPick(p: Omit<BtPick, "cursor">): void {
   BT.pick = { ...p, cursor: 0 };
   BT.mode = "pick";
 }
@@ -178,7 +265,7 @@ function closePick(): void {
 }
 
 /** Mueve el cursor al objetivo más cercano en la dirección pedida. */
-function navigate(pick: Pick, dx: number, dy: number): void {
+function navigate(pick: BtPick, dx: number, dy: number): void {
   const cur = pick.targets[pick.cursor].rect;
   const cx = cur.x + cur.w / 2;
   const cy = cur.y + cur.h / 2;
@@ -244,17 +331,12 @@ function actionHand(): void {
   });
 }
 
-function afterAction(err: string | null): void {
-  if (toast(err)) return;
-  closePick();
-}
-
 function playFromHand(hi: number): void {
   const b = BT.b!;
   const p = b.p[HUMAN];
   const card = p.hand[hi].c;
   if (card.kind === "pokemon" && card.stage === "Basic") {
-    return afterAction(playBasic(b, HUMAN, hi));
+    return act({ t: "playBasic", card: p.hand[hi].uid });
   }
   if (card.kind === "pokemon") {
     const slots = evolveTargets(b, HUMAN, hi);
@@ -265,7 +347,7 @@ function playFromHand(hi: number): void {
     return openPick({
       prompt: `¿A cuál evoluciona ${card.name}?`,
       targets: slotTargets(HUMAN, slots),
-      onPick: (t) => afterAction(evolve(b, HUMAN, hi, t.slot!)),
+      onPick: (t) => act({ t: "evolve", card: p.hand[hi].uid, target: t.slot!.uid }),
       onCancel: actionHand,
     });
   }
@@ -274,11 +356,17 @@ function playFromHand(hi: number): void {
     return openPick({
       prompt: `¿A qué Pokémon unís ${card.name}?`,
       targets: slotTargets(HUMAN, inPlay(p)),
-      onPick: (t) => afterAction(attachEnergy(b, HUMAN, hi, t.slot!)),
+      onPick: (t) => act({ t: "attachEnergy", card: p.hand[hi].uid, target: t.slot!.uid }),
       onCancel: actionHand,
     });
   }
-  // Entrenador: sus pasos dicen qué hay que elegir
+  // Entrenador: sus pasos dicen qué hay que elegir. Si busca en el mazo o lo ordena, el cliente no ve el mazo:
+  // primero se "mira" (peek) y el motor responde con las cartas; el flujo arranca en onPeek.
+  if (trainerSteps(card).some((st) => st.op === "searchDeck" || st.op === "arrangeTop")) {
+    CHOOSER = null;
+    closePick();
+    return bsend({ t: "peek", card: p.hand[hi].uid });
+  }
   if (toast(trainerError(b, HUMAN, hi))) return;
   trainerFlow(hi);
 }
@@ -343,6 +431,7 @@ function updateBattle(dt: number): void {
     if (hit(KEYS.a) || hit(KEYS.b) || hit(KEYS.view)) BT.zoom = null;
     return;
   }
+  if (BT.waiting) return; // esperando la respuesta del motor
   if (CHOOSER) return updateChooser();
   if (hit(KEYS.view)) {
     const c = hoveredCard();
@@ -360,26 +449,20 @@ function updateBattle(dt: number): void {
     showBanner(b.cur === HUMAN ? "TU TURNO" : `TURNO DE ${rivalName()}`);
     BT.mode = b.cur === HUMAN ? "menu" : "idle";
     BT.menuCursor = 0;
-    BT.aiTimer = 0;
   }
   if (BT.bannerT > 0) return;
 
   if (b.phase === "promote") {
     const pi = b.promoteQueue[0];
-    if (pi === RIVAL) {
-      BT.aiTimer += dt;
-      if (BT.aiTimer > 0.7) {
-        BT.aiTimer = 0;
-        aiPromote(b, RIVAL);
-      }
-    } else if (BT.pick?.tag !== "promote") {
+    if (pi === RIVAL) BT.driver!.tick(dt); // el rival elige su nuevo Activo
+    else if (BT.pick?.tag !== "promote") {
       openPick({
         prompt: "Necesitás un nuevo Pokémon Activo. Elegí uno de tu Banca.",
         targets: slotTargets(HUMAN, b.p[HUMAN].bench),
         onPick: (t) => {
           BT.pick = null;
           BT.mode = "idle";
-          promote(b, HUMAN, b.p[HUMAN].bench.indexOf(t.slot!));
+          bsend({ t: "promote", bench: t.slot!.uid });
         },
         tag: "promote",
       });
@@ -392,11 +475,7 @@ function updateBattle(dt: number): void {
   if (b.phase !== "turn") return;
 
   if (b.cur === RIVAL) {
-    BT.aiTimer += dt;
-    if (BT.aiTimer > 0.9) {
-      BT.aiTimer = 0;
-      aiStep(b, RIVAL);
-    }
+    BT.driver!.tick(dt); // local: mueve a la IA; remoto: el servidor manda los estados solo
     return;
   }
 
@@ -429,10 +508,9 @@ function updateBattle(dt: number): void {
     case "VER MESA": return actionView();
     case "FIN DEL TURNO":
       BT.mode = "idle";
-      log(b, `${b.p[HUMAN].name} termina su turno.`);
-      return endTurn(b);
+      return bsend({ t: "endTurn" });
     case "RENDIRSE":
-      return surrender(b, HUMAN);
+      return bsend({ t: "surrender" });
   }
 }
 
@@ -576,9 +654,13 @@ function drawField(): void {
   for (const pi of [RIVAL, HUMAN]) {
     const p = b.p[pi];
     // en la preparación, los Pokémon del rival están boca abajo
-    const hidden = b.phase === "setup" && pi === RIVAL;
-    const put = (s: Slot | undefined | null, r: Rect) =>
-      s ? (hidden ? drawCardBack(r.x, r.y, r.w, r.h) : drawFieldSlot(s, r)) : emptySlot(r);
+    // (el motor manda solo cuántos hay: la Activa va boca abajo y la Banca, tantos dorsos como Pokémon)
+    if (pi === RIVAL && b.oppHidden) {
+      for (let i = 0; i < BENCH_MAX; i++) i < b.oppBenchHidden ? drawCardBack(benchRect(pi, i).x, benchRect(pi, i).y, 70, 98) : emptySlot(benchRect(pi, i));
+      drawCardBack(activeRect(pi).x, activeRect(pi).y, activeRect(pi).w, activeRect(pi).h);
+      continue;
+    }
+    const put = (s: Slot | undefined | null, r: Rect) => (s ? drawFieldSlot(s, r) : emptySlot(r));
     for (let i = 0; i < BENCH_MAX; i++) put(p.bench[i], benchRect(pi, i));
     put(p.active, activeRect(pi));
   }
@@ -739,14 +821,13 @@ function drawActionPanel(): void {
 }
 
 function drawLog(): void {
-  const b = BT.b!;
   const x = PANEL.x;
   const w = PANEL.w;
   const y = 486;
   const h = 146;
   rrect(x, y, w, h, 10, "rgba(10,20,30,0.82)", "#283850", 3);
   const lines: string[] = [];
-  for (const msg of b.log.slice(-14)) lines.push(...wrapText(msg, 7, w - 22));
+  for (const msg of BT.log.slice(-14)) lines.push(...wrapText(msg, 7, w - 22));
   const shown = lines.slice(-12);
   shown.forEach((l, i) => {
     const isLast = i >= shown.length - 2;
