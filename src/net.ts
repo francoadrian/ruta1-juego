@@ -507,7 +507,7 @@ async function netStartNpc(npcId: string, prizes: number, onFail: (msg: string) 
   if (!deckId) return onFail("Tu mazo principal no sirve para jugar. Revisalo en MAZO.");
   if (NET.starting) return;
   NET.starting = { t0: Date.now(), onFail };
-  if (!netSend({ type: "npc.start", npc: npcId, deckId })) {
+  if (!netSend({ type: "npc.start", npc: npcId, deckId, prizes })) {
     NET.starting = null;
     return onFail("No hay conexión con el servidor.");
   }

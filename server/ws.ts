@@ -425,9 +425,10 @@ export function attachWs(srv: Server, deps: WsDeps): WsHandle {
     const def = typeof msg.npc === "string" && world && Array.isArray(world.npcs) ? world.npcs.find((n: any) => n && n.id === msg.npc) : undefined;
     if (!def || def.battle === false) return err(conn, "npc.start", "Ese NPC no juega partidas.");
     if (overStartBudget(conn, me, "npc.start")) return;
-    // contra un NPC los premios los fija el servidor (6, o def.prizes si es > 0): el `prizes` del cliente se ignora
+    // premios contra un NPC: si def.prizes > 0, esos (el `prizes` del cliente se ignora); si no, el jugador elige 6 o 1
+    // (solo esas dos opciones, como en el diálogo; cualquier otro valor o ausente → 6)
     const fixed = Number(def.prizes) || 0;
-    const prizes = fixed > 0 ? Math.max(1, Math.min(6, Math.floor(fixed))) : 6;
+    const prizes = fixed > 0 ? Math.max(1, Math.min(6, Math.floor(fixed))) : msg.prizes === 1 ? 1 : 6;
     const core = engine.core();
     const mine = deckOf(core, me.id, typeof msg.deckId === "string" ? msg.deckId : undefined);
     if ("error" in mine) return err(conn, "npc.start", mine.error);

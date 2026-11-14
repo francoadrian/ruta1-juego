@@ -1113,13 +1113,15 @@ describe("Endurecimiento: B4, B8, deckName y mazos con cartas que ya no se regal
   before(async () => { s = await startServer(); });
   after(() => s.stop());
 
-  it("B8: contra un NPC los premios los fija el servidor (6): el `prizes` del cliente se ignora", async () => {
-    const p = await newPlayer(s, "Ana");
-    const c = await Client.login(s.port, p);
-    c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1", prizes: 1 });
-    const st = await c.take("match.start");
-    assert.equal(st.view.prizeCount, 6);
-    c.close();
+  it("B8: contra un NPC sin `prizes` el jugador elige 6 o 1; cualquier otro valor es 6", async () => {
+    for (const [i, [asked, got]] of ([[1, 1], [6, 6], [3, 6], ["1", 6], [undefined, 6]] as const).entries()) {
+      const p = await newPlayer(s, `Ana${"abcde"[i]}`);
+      const c = await Client.login(s.port, p);
+      c.send({ type: "npc.start", npc: TEST_NPC, deckId: "d1", prizes: asked });
+      const st = await c.take("match.start");
+      assert.equal(st.view.prizeCount, got, `pidió ${String(asked)}`);
+      c.close();
+    }
   });
 
   it("deckName: cada uno ve solo el nombre de su propio mazo", async () => {
