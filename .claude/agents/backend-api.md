@@ -20,6 +20,7 @@ Sos el responsable del backend de "Ruta 1". Leé `CLAUDE.md` y el ADR del hito e
 - No abras puertos del router ni escribas configuración de firewall: proponé los pasos al usuario.
 
 ## Reglas generales
+- **No cambies reglas ni comportamiento de juego que no se hayan pedido** (premios, recompensas, límites, dificultad, opciones que ve el jugador), aunque te parezca más seguro o más prolijo. Si ves un riesgo o una mejora así, describila en el reporte como algo para que decida el usuario.
 - El servidor es Node/TS (`node:*` y `ws`); Python solo en `tools/`, con biblioteca estándar.
 - Mantené la concurrencia optimista existente (`rev` y 409) y las transacciones del buzón.
 - **Nunca leas, edites ni borres `data/game.db`**. Para probar, usá una DB temporal (por ejemplo `Store(tmp_path / "test.db")`).

@@ -193,7 +193,8 @@ function drawNetOverlay(): void {
     if (BT.b.phase !== "over" && NET.deadline) {
       const left = NET.deadline - Date.now() / 1000;
       const mine = NET.waiting !== "opp";
-      overlayBox(`${mine ? "TU TIEMPO" : "TIEMPO RIVAL"} ${mmss(left)}`, 236, 232, 8, left < 15 ? "rgba(176,40,32,0.95)" : "rgba(24,32,48,0.9)", "#f0c040");
+      // el tuyo, justo arriba de tu panel (nombre y premios, abajo a la izquierda); el del rival, justo debajo del suyo
+      overlayBox(`${mine ? "TU TIEMPO" : "TIEMPO RIVAL"} ${mmss(left)}`, 8, mine ? 376 : 242, 7, left < 15 ? "rgba(176,40,32,0.95)" : "rgba(24,32,48,0.9)", "#f0c040");
     }
     if (NET.link !== "open") overlayBox("RECONECTANDO...", CW / 2 - 110, 6, 10, "rgba(176,40,32,0.95)", "#f8d060");
     else if (NET.opp.status === "disconnected" && BT.b.phase !== "over") {

@@ -32,7 +32,7 @@ Coordinás un hito de la hoja de ruta de `CLAUDE.md` usando los agentes de `.cla
 
 ## 4. Auditoría — `auditor-seguridad`
 - Lanzá `auditor-seguridad` sobre los cambios de la rama (`git diff main...HEAD`).
-- Los hallazgos Críticos y Altos se arreglan con el agente correspondiente y se vuelve a verificar. Los Medios y Bajos se le muestran al usuario para que decida.
+- Los hallazgos Críticos y Altos se arreglan con el agente correspondiente y se vuelve a verificar, **salvo que el arreglo cambie el comportamiento del juego o algo que pidió el usuario**: en ese caso, se le muestran las opciones al usuario para que decida. Los Medios y Bajos, y la sección "Para que decida el usuario", se le muestran al usuario para que decida. Nunca se aplica por cuenta propia una restricción de diseño (premios, recompensas, límites de juego).
 
 ## 5. Cierre
 - Hacé commits en la rama: uno por paso lógico, con mensaje en español.

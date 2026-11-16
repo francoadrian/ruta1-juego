@@ -112,6 +112,7 @@ Las decisiones de diseño van en ADRs cortos. Los de este repo están en `docs/a
 - El servidor (`server/`) y los tests son TypeScript "borrable" (solo sintaxis que Node puede ejecutar quitando tipos: sin `enum` ni `namespace`). `src/` son scripts globales.
 - Python solo con biblioteca estándar, y solo en `tools/` (p. ej. `backup_db.py`) y en el backoffice (repo aparte). El juego no usa Python.
 - Cambios chicos y enfocados. No reformatear archivos enteros.
+- **Las decisiones de diseño y de juego son del usuario.** No cambies reglas, premios, recompensas, dificultad, límites de juego ni comportamiento visible que no se hayan pedido, aunque un agente (incluido `auditor-seguridad`) lo sugiera "por seguridad" o "para evitar abusos". Lo que el admin configura desde el backoffice (NPCs, recompensas, `once`, `prizes`, sobres…) es una decisión suya y se respeta tal cual. Si ves un riesgo así, **avisá** con la opción sugerida y dejá que el usuario decida; no lo implementes. Sí se arreglan sin preguntar los bugs y las vulnerabilidades reales (un cliente que hace trampa, acceso indebido, datos corruptos), siempre que el arreglo no cambie lo que el usuario pidió.
 
 ## Flujo de trabajo: qué agente usar
 

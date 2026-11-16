@@ -450,16 +450,17 @@ function talkTo(n: NpcRt): void {
     return;
   }
   openDialog(npcSay(n, d.intro, "¡Hola!"), () => {
-    const fixed = Number(n.def.prizes) || 0;
-    // los premios contra un NPC los fija el servidor (6, o los del NPC): no se eligen
-    const shown = fixed || 6;
-    const opts = [`¡DALE! (${shown} PREMIO${shown > 1 ? "S" : ""})`, "AHORA NO"];
+    // si el NPC tiene `prizes` (> 0) se juega a esa cantidad; si no, el jugador elige 6 o 1
+    // (mismo criterio que el servidor, server/ws.ts)
+    const raw = Number(n.def.prizes) || 0;
+    const fixed = raw > 0 ? Math.max(1, Math.min(6, Math.floor(raw))) : 0;
+    const opts = fixed ? [`¡DALE! (${fixed} PREMIO${fixed > 1 ? "S" : ""})`, "AHORA NO"] : ["6 PREMIOS", "1 PREMIO", "CANCELAR"];
     openChoice(fillText(n, d.question || "¿Jugamos una partida?"), opts, (i) => {
       if (i === opts.length - 1) {
         openDialog(npcSay(n, d.decline, "Bueno, otra vez será."), back);
         return;
       }
-      game.battlePrizes = shown;
+      game.battlePrizes = fixed || (i === 0 ? 6 : 1);
       game.opponent = n;
       game.mode = "flash";
       game.flashT = 0;

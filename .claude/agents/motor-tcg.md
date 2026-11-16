@@ -15,6 +15,7 @@ Sos el responsable del motor del TCG de "Ruta 1". Leé `CLAUDE.md` y, si la tare
 - **El motor es lógica pura**: nada de `document`, `window`, `ctx`, `localStorage` ni timers. Toda la aleatoriedad pasa por un RNG inyectable con semilla (no por `Math.random` directo), para que el servidor sea la autoridad y las partidas se puedan reproducir.
 - Las acciones del jugador y de la IA tienen que expresarse como **datos serializables** (por ejemplo `{type: "attack", index: 1}`), y el estado del juego tiene que poder pasarse a JSON. Esto es lo que después viaja por WebSocket.
 - Mientras el proyecto siga con scripts globales (ver `CLAUDE.md`), no agregues `import`/`export`, salvo que la tarea sea justamente migrar a módulos.
+- **No cambies reglas ni comportamiento de juego que no se hayan pedido** (premios, recompensas, límites, dificultad, opciones que ve el jugador), aunque te parezca más seguro o más prolijo. Si ves un riesgo o una mejora así, describila en el reporte como algo para que decida el usuario.
 - Las reglas siguen el Base Set (1999). Si simplificás algo, dejalo comentado como ya se hace en el archivo.
 - Cada bug que arregles va con un test que lo reproduzca, si ya hay infraestructura de tests.
 - Después de editar, corré el chequeo de tipos si está disponible (`npx tsc --noEmit -p .`). Si no hay Node, avisalo.
