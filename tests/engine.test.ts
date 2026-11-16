@@ -193,6 +193,20 @@ describe("reglas de applyIntent", () => {
     assert.match(c.applyIntent(m, 0, { t: "setupDone" }), /terminó/);
   });
 
+  it("una lista de cartas con repetidos se rechaza sin tocar el estado (no duplica cartas)", () => {
+    const m = fresh("r-dup");
+    setupBoth(m);
+    const pi = m.b.cur;
+    const p = m.b.p[pi];
+    const [a, b2] = p.hand;
+    const before = JSON.stringify(m.b.p);
+    // Maintenance mezclaba dos veces la misma carta en el mazo; pasa lo mismo con cualquier lista
+    const picks = { 0: { cards: [a.uid, b2.uid, a.uid] } };
+    assert.match(c.applyIntent(m, pi, { t: "playTrainer", card: a.uid, choice: { picks } }), /inválida/);
+    assert.match(c.applyIntent(m, pi, { t: "retreat", bench: 0, energies: [a.uid, a.uid] }), /inválida/);
+    assert.equal(JSON.stringify(m.b.p), before);
+  });
+
   it("cambiar de Activo en la preparación devuelve el anterior a la mano", () => {
     const m = fresh("r2");
     const p = m.b.p[0];

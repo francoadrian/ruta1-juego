@@ -44,7 +44,7 @@ interface Srv {
   db: string;
   env: NodeJS.ProcessEnv;
   invite(): string;
-  stop(): Promise<void>;
+  stop(signal?: NodeJS.Signals): Promise<void>;
   out(): string;
 }
 const tmps: string[] = [];
@@ -103,9 +103,9 @@ async function startServer(extra: Record<string, string> = {}, reuse?: { dir: st
       assert.ok(m, r.stdout + r.stderr);
       return m[1];
     },
-    async stop() {
+    async stop(signal?: NodeJS.Signals) {
       if (child.exitCode === null) {
-        child.kill();
+        child.kill(signal);
         await new Promise((res) => { child.once("exit", res); setTimeout(res, 3000); });
       }
     },
@@ -974,7 +974,9 @@ describe("WebSocket: reinicio del servidor", () => {
     const { sa } = await startPvp(s, a, pa, b, pb, 6);
     a.send({ type: "match.intent", match: sa.match, n: 1, intent: decide(sa.view, new Set()) });
     await a.take((m) => m.type === "match.state" && m.ack === 1);
-    await s.stop();
+    // corte abrupto (SIGKILL): con SIGTERM/Ctrl+C el servidor ya anula las partidas al cerrar y al arrancar no queda
+    // ninguna abierta; en Windows child.kill() corta de golpe, en Linux/macOS manda SIGTERM
+    await s.stop("SIGKILL");
     const s2 = await startServer({}, { dir: s.dir });
     try {
       assert.match(s2.out(), /1 partida\(s\) en curso anuladas/);

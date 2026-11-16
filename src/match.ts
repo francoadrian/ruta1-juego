@@ -158,7 +158,8 @@ const mIsObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x ===
 
 function mRefs(x: unknown): Ref[] | null {
   if (!Array.isArray(x) || x.length > 60) return null;
-  return x.every(mIsRef) ? [...x] : null;
+  // sin repetidos: la misma carta dos veces la duplicaría (p. ej. Maintenance la mezclaba dos veces en el mazo)
+  return x.every(mIsRef) && new Set(x).size === x.length ? [...x] : null;
 }
 
 /** Devuelve una copia limpia de la intención (solo los campos conocidos) o un error en español. */
